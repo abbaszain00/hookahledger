@@ -1,0 +1,24 @@
+﻿# Secrets
+.env
+*.key
+
+# Data (large + maybe scraped)
+data/raw/*
+data/clean/*
+!data/raw/.gitkeep
+!data/clean/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Notebooks
+.ipynb_checkpoints/

@@ -1,0 +1,15 @@
+lounge_id,name,area,neighbourhood,price_tier,price_estimate_gbp,google_query,address_hint,review_volume,mvv_priority,notes
+tigerbay_kingsbury,TigerBay Shisha Lounge (Kingsbury),North London,Kingsbury,premium,30,TigerBay Shisha Lounge Kingsbury,"234 Kingsbury Road, NW9 0BH",high,1,Anchor lounge - validation read confirmed high specificity
+noya_harringay,Noya Shisha Lounge & Restaurant,North London,Harringay/Wood Green,premium,35,Noya Shisha Lounge North London,"454-460 W Green Rd, N15 3PT",high,1,"Pan-Asian + shisha, Featured in Love Is Blind UK"
+laika_soho,Laika Shisha Lounge,Central London,Soho,premium,45,Laika Shisha Lounge Frith Street Soho,"45 Frith St, W1D 4SD",medium,2,"Russian tobacco brands (Duft, Darkside), retractable roof"
+mamounia_mayfair,Mamounia Lounge Mayfair,Central London,Mayfair,premium,40,Mamounia Lounge Mayfair Curzon Street,"37A Curzon Street, W1J 7TX",high,1,"Upmarket Moroccan vibe, electric + traditional shisha"
+drunch_mayfair,Drunch Mayfair,Central London,Mayfair,premium,35,Drunch Mayfair Woodstock Street,"1 Woodstock Street, W1C 2AA",medium,2,"Family-run Syrian, shisha garden, brunch + shisha"
+shishawi_edgware,Shishawi,Central London,Edgware Road,mid,20,Shishawi Edgware Road London,"Edgware Road, near Marble Arch",high,1,"24/7, classic Edgware Road Arabic scene"
+aldar_edgware,Al-Dar I,Central London,Edgware Road,mid,20,Al-Dar Edgware Road London,"61-63 Edgware Road, W2 2HZ",medium,2,"Lebanese food + shisha, classic Edgware spot"
+basrah_edgware,Basrah Lounge,Central London,Edgware Road,mid,22,Basrah Lounge Edgware Road London,Edgware Road,medium,3,"Traditional preparation, Gulf regional mixes"
+globe_lounge_forest_gate,Globe Lounge,East London,Forest Gate,budget,15,Globe Lounge Forest Gate London,"Forest Gate, E7",medium,3,"Café-lounge, late night, affordable, locals' spot"
+ground5_south,Ground5 Shisha Lounge,South London,Streatham,mid,25,Ground5 Shisha Lounge London,South London,medium,2,"Sophisticated, polished marble, fruit-bowl shishas"
+cafe_cairo_clapham,Cafe Cairo,South London,Clapham,mid,22,Cafe Cairo Clapham Landor Road,"88 Landor Road, SW9 9PE",medium,3,"Egyptian-themed, 'Magic Tent' for shisha, late-night cocktails"
+shisha_garden_edgware,The Shisha Garden,North London,Edgware,mid,25,The Shisha Garden Edgware London,"88 Whitchurch Lane, HA8 6QN",medium,3,"Garden-style, members only, smart dress"
+the_banc_seven_sisters,The Banc,North London,Seven Sisters / Turnpike Lane,mid,25,The Banc Shisha Lounge Seven Sisters London,Seven Sisters / Turnpike Lane,medium,2,"Two-floor shisha bar, halal Mediterranean"
+smoke_lab_vauxhall,Smoke Lab Riverside,South London,Vauxhall,premium,30,Smoke Lab Riverside Vauxhall shisha,"3 Saint George Wharf, SW8 2LE",medium,3,"River views, large vapor menu"
