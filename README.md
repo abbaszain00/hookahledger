@@ -52,6 +52,14 @@ OPENROUTER_API_KEY=...       # optional, only needed for legacy pilots
 
 The Anthropic and Cohere keys are required. Gemini and OpenRouter are only used by abandoned scripts kept for reference.
 
+**Note on protobuf compatibility:** Set the environment variable `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` before running. ChromaDB's bundled OpenTelemetry conflicts with newer protobuf versions, and this env var forces the pure-Python parser to sidestep the issue.
+
+```bash
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python   # Linux/Mac/Git Bash
+# or for cmd:
+set PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+```
+
 ## Running a query
 
 ```bash

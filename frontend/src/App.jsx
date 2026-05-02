@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 
 const API_BASE = "http://localhost:8000";
@@ -36,37 +36,95 @@ export default function App() {
   const [priceTier, setPriceTier] = useState("");
   const [aspectPositive, setAspectPositive] = useState("");
 
-  const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
 
-  async function handleSubmit() {
-    if (!query.trim() || loading) return;
-    setLoading(true);
+  // Hold the EventSource so we can close it on unmount or on a new query
+  const eventSourceRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup on unmount
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
+
+  function handleSubmit() {
+    if (!query.trim() || streaming) return;
+
+    // Tear down any prior stream
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    setStreaming(true);
+    setStreamingText("");
     setError(null);
     setResult(null);
-    try {
-      const body = { query: query.trim() };
-      if (area) body.area = area;
-      if (priceTier) body.price_tier = priceTier;
-      if (aspectPositive) body.aspect_positive = aspectPositive;
 
-      const response = await fetch(`${API_BASE}/api/query`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`API ${response.status}: ${text}`);
+    // Build the URL with query params (EventSource only supports GET)
+    const params = new URLSearchParams({ query: query.trim() });
+    if (area) params.set("area", area);
+    if (priceTier) params.set("price_tier", priceTier);
+    if (aspectPositive) params.set("aspect_positive", aspectPositive);
+
+    const url = `${API_BASE}/api/chat/stream?${params.toString()}`;
+    const es = new EventSource(url);
+    eventSourceRef.current = es;
+
+    es.addEventListener("token", (e) => {
+      try {
+        const chunk = JSON.parse(e.data);
+        setStreamingText((prev) => prev + chunk);
+      } catch (err) {
+        console.error("Failed to parse token:", err, e.data);
       }
-      const data = await response.json();
-      setResult(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    });
+
+    es.addEventListener("evidence", (e) => {
+      try {
+        const evidence = JSON.parse(e.data);
+        setResult(evidence);
+      } catch (err) {
+        console.error("Failed to parse evidence:", err);
+        setError("Failed to parse evidence event");
+      }
+    });
+
+    es.addEventListener("done", () => {
+      es.close();
+      eventSourceRef.current = null;
+      setStreaming(false);
+    });
+
+    es.addEventListener("error", (e) => {
+      // EventSource fires 'error' for both server-sent error events AND
+      // network/connection failures. The server-sent ones have a data field;
+      // network errors don't.
+      const data = e.data;
+      if (data) {
+        try {
+          const parsed = JSON.parse(data);
+          setError(parsed.error || "Server error during streaming");
+        } catch {
+          setError("Server error during streaming");
+        }
+      } else {
+        // Connection error - only show if we weren't already done
+        // (EventSource fires error after a clean close too)
+        if (eventSourceRef.current === es) {
+          setError("Connection lost during streaming");
+        }
+      }
+      es.close();
+      eventSourceRef.current = null;
+      setStreaming(false);
+    });
   }
 
   function handleKeyDown(e) {
@@ -75,6 +133,11 @@ export default function App() {
       handleSubmit();
     }
   }
+
+  // Decide what text to display: validated text from the evidence event if
+  // we have it, otherwise the in-progress streaming text.
+  const displayedText = result?.answer_validated ?? streamingText;
+  const showAnswerCard = streaming || streamingText || result;
 
   return (
     <div className="min-h-screen bg-stone-50">
@@ -94,21 +157,21 @@ export default function App() {
               value={area}
               onChange={setArea}
               options={AREAS}
-              disabled={loading}
+              disabled={streaming}
             />
             <FilterSelect
               label="Price tier"
               value={priceTier}
               onChange={setPriceTier}
               options={PRICE_TIERS}
-              disabled={loading}
+              disabled={streaming}
             />
             <FilterSelect
               label="Aspect"
               value={aspectPositive}
               onChange={setAspectPositive}
               options={ASPECTS}
-              disabled={loading}
+              disabled={streaming}
             />
           </aside>
 
@@ -122,14 +185,14 @@ export default function App() {
                 onKeyDown={handleKeyDown}
                 placeholder="e.g. best service in north london"
                 className="flex-1 px-4 py-2 border border-stone-300 rounded focus:outline-none focus:border-stone-500"
-                disabled={loading}
+                disabled={streaming}
               />
               <button
                 onClick={handleSubmit}
-                disabled={loading || !query.trim()}
+                disabled={streaming || !query.trim()}
                 className="px-6 py-2 bg-stone-800 text-white rounded disabled:opacity-50 hover:bg-stone-700"
               >
-                {loading ? "Thinking…" : "Ask"}
+                {streaming ? "Thinking…" : "Ask"}
               </button>
             </div>
 
@@ -139,13 +202,55 @@ export default function App() {
               </div>
             )}
 
-            {loading && (
-              <div className="p-4 mb-4 bg-stone-100 border border-stone-200 rounded text-stone-600 text-sm">
-                Searching reviews and generating answer…
+            {showAnswerCard && (
+              <div className="space-y-6">
+                {/* Answer */}
+                <div className="p-6 bg-white border border-stone-200 rounded">
+                  <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3 flex items-center gap-2">
+                    Answer
+                    {streaming && (
+                      <span className="inline-block w-2 h-2 rounded-full bg-stone-400 animate-pulse" />
+                    )}
+                  </h2>
+                  <div className="prose prose-stone prose-sm max-w-none">
+                    {displayedText ? (
+                      <ReactMarkdown>{displayedText}</ReactMarkdown>
+                    ) : (
+                      <span className="text-stone-400 italic">
+                        Searching reviews…
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Evidence cards (only after stream completes) */}
+                {result?.lounges?.length > 0 && (
+                  <div>
+                    <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3">
+                      Evidence ({result.lounges.length}{" "}
+                      {result.lounges.length === 1 ? "lounge" : "lounges"})
+                    </h2>
+                    <div className="space-y-4">
+                      {result.lounges.map((lounge) => (
+                        <LoungeCard key={lounge.lounge_id} lounge={lounge} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Metadata */}
+                {result && (
+                  <div className="text-xs text-stone-500 pt-4 border-t border-stone-200">
+                    {result.candidates_pulled} candidates pulled ·{" "}
+                    {result.chunks?.length || 0} chunks · {result.tokens_in} in
+                    / {result.tokens_out} out · ${result.cost_usd?.toFixed(4)} ·{" "}
+                    {result.quote_validations?.filter((v) => v.valid).length ||
+                      0}
+                    /{result.quote_validations?.length || 0} quotes verified
+                  </div>
+                )}
               </div>
             )}
-
-            {result && <AnswerView result={result} />}
           </main>
         </div>
       </div>
@@ -175,54 +280,12 @@ function FilterSelect({ label, value, onChange, options, disabled }) {
   );
 }
 
-function AnswerView({ result }) {
-  return (
-    <div className="space-y-6">
-      {/* Answer */}
-      <div className="p-6 bg-white border border-stone-200 rounded">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3">
-          Answer
-        </h2>
-        <div className="prose prose-stone prose-sm max-w-none">
-          <ReactMarkdown>{result.answer_validated}</ReactMarkdown>
-        </div>
-      </div>
-
-      {/* Evidence cards */}
-      {result.lounges?.length > 0 && (
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3">
-            Evidence ({result.lounges.length}{" "}
-            {result.lounges.length === 1 ? "lounge" : "lounges"})
-          </h2>
-          <div className="space-y-4">
-            {result.lounges.map((lounge) => (
-              <LoungeCard key={lounge.lounge_id} lounge={lounge} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Metadata */}
-      <div className="text-xs text-stone-500 pt-4 border-t border-stone-200">
-        {result.candidates_pulled} candidates pulled ·{" "}
-        {result.chunks?.length || 0} chunks · {result.tokens_in} in /{" "}
-        {result.tokens_out} out · ${result.cost_usd?.toFixed(4)} ·{" "}
-        {result.quote_validations?.filter((v) => v.valid).length || 0}/
-        {result.quote_validations?.length || 0} quotes verified
-      </div>
-    </div>
-  );
-}
-
 function LoungeCard({ lounge }) {
-  // Top 5 aspect_counts by n_reviews, sorted descending
   const topAspects = (lounge.aspect_counts || [])
     .slice()
     .sort((a, b) => b.n_reviews - a.n_reviews)
     .slice(0, 5);
 
-  // Top quote from the highest-scoring chunk for this lounge
   const topChunk = lounge.chunks?.[0];
   const reviewExcerpt = topChunk ? extractReview(topChunk.document) : null;
 
@@ -279,10 +342,8 @@ function AspectRow({ aspect }) {
 }
 
 function extractReview(document) {
-  // The Chroma documents are formatted: "Lounge: ... | ... | Review: <text>"
   const idx = document.indexOf("Review: ");
   if (idx === -1) return null;
   const text = document.slice(idx + 8);
-  // Trim to a reasonable length so the card doesn't blow up
   return text.length > 300 ? text.slice(0, 300) + "…" : text;
 }
