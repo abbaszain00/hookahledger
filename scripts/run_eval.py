@@ -1,42 +1,39 @@
 """
 run_eval.py - score retrieval precision@5 against the hand-curated eval set.
 
-For each query in tests/eval_queries.json, runs up to THREE passes:
-  1. NO RERANK            - similarity * recency only
-  2. RERANK               - rerank-v3.5 over the bare query
+For each query in tests/eval_queries.json, runs up to FOUR passes:
+  1. NO RERANK            - similarity * recency only, JSON filters
+  2. RERANK               - rerank-v3.5 over the bare query, JSON filters
   3. FILTERED+RERANK      - rerank with aspect_positive filter applied
-                            (only run when query has an aspect_filter field)
+                            (only when query has an aspect_filter field)
+  4. AGENT+RERANK         - LangGraph parse_query infers the filters from
+                            natural language; rerank applied. Uses the
+                            agent's filters, not the JSON's.
 
 Each pass is scored precision@5: 1 if any expected_lounges appears in the
 top-5 surfaced lounges, else 0.
 
+The agent pass is the headline experiment. If precision is similar to or
+better than the JSON-filter pass, that means the agent can derive the same
+filters the human picked - which is the demo claim. If it underperforms,
+that's writeup material.
+
 Cohere trial keys are limited to 10 rerank calls per minute. The runner
-paces rerank calls with a sleep of (60 / 10) + small buffer = 6.5 seconds
-to stay under the limit. With ~19 rerank calls in this eval set, this
-adds ~2 minutes of wall time but produces honest rerank numbers instead
-of triggering the Fix 2 fallback path.
-
-Why three passes instead of two:
-  - Bare semantic queries like "best flavour quality" struggle because dense
-    retrieval surfaces reviews that MENTION flavour, not lounges with the
-    most positive flavour signal. The aspect filter is the system's built-in
-    answer to that. The third pass measures whether the user using the
-    filter rescues the query.
-
-What this measures and what it doesn't:
-  - Retrieval only. Whether the answer Sonnet generates is correct is a
-    separate question.
-  - Negative-evidence and thin-evidence queries are NOT in this file by
-    design; they test answer-layer behaviour which precision@5 can't
-    capture. They run live in the demo as qualitative flows.
+sleeps 6.5s between rerank calls. With this v4 set (~30 rerank calls)
+that adds ~3 min of wait time but produces honest numbers instead of
+triggering the Fix 2 fallback path.
 
 Usage:
   python scripts/run_eval.py
-  python scripts/run_eval.py --no-sleep        # if you have a paid Cohere key
+  python scripts/run_eval.py --no-sleep        # paid Cohere key
+  python scripts/run_eval.py --skip-agent      # v3 behaviour
   python scripts/run_eval.py --json > eval_results.json
 """
 
 from __future__ import annotations
+
+import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
 import argparse
 import json
@@ -45,11 +42,16 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from retrieve import RetrievalPipeline  # noqa: E402
 
+# Agent imports - only used if --skip-agent is not set
+from agent.nodes import parse_query, validate_parse  # noqa: E402
+from agent.state import AgentState  # noqa: E402
 
-# Cohere trial: 10 calls/minute. 60/10 = 6.0; add buffer for clock skew.
+
 RERANK_SLEEP_SECONDS = 6.5
 
 
@@ -58,10 +60,12 @@ RERANK_SLEEP_SECONDS = 6.5
 # ---------------------------------------------------------------------------
 @dataclass
 class QueryRun:
-    pass_label: str                # "no_rerank" | "rerank" | "filtered_rerank"
+    pass_label: str
     surfaced_lounges: list[str]
     passed: bool
     n_chunks: int
+    # Agent pass only - what the agent inferred
+    agent_filters: dict | None = None
 
 
 @dataclass
@@ -88,8 +92,10 @@ class EvalSummary:
     no_rerank: PassMetrics
     rerank: PassMetrics
     filtered_rerank: PassMetrics
+    agent_rerank: PassMetrics
     rerank_lift_points: float
     filter_lift_points: float
+    agent_lift_points: float
     by_category: dict
 
 
@@ -109,6 +115,7 @@ def run_one_pass(
     top_k: int,
     rerank: bool,
     pass_label: str,
+    agent_filters: dict | None = None,
 ) -> QueryRun:
     result = pipeline.retrieve(
         query=query,
@@ -127,7 +134,33 @@ def run_one_pass(
         surfaced_lounges=seen,
         passed=score_top_k(seen, expected_lounges),
         n_chunks=len(result.chunks),
+        agent_filters=agent_filters,
     )
+
+
+def run_agent_parse(query: str) -> dict:
+    """Run only the parse_query + validate_parse nodes from the graph.
+
+    Returns a dict {area, price_tier, aspect_positive, cleaned_query, parse_valid}.
+    Used in the agent pass to derive filters from natural language without
+    invoking the full graph (no Sonnet call needed - we only want the
+    retrieval result).
+    """
+    state = AgentState(raw_query=query)
+    parse_update = parse_query(state)
+    for k, v in parse_update.items():
+        setattr(state, k, v)
+    validate_update = validate_parse(state)
+    for k, v in validate_update.items():
+        setattr(state, k, v)
+    return {
+        "area": state.area if state.parse_valid else None,
+        "price_tier": state.price_tier if state.parse_valid else None,
+        "aspect_positive": state.aspect_positive if state.parse_valid else None,
+        "cleaned_query": state.cleaned_query if state.parse_valid else query,
+        "parse_valid": state.parse_valid,
+        "parse_confidence": state.parse_confidence,
+    }
 
 
 def run_eval(
@@ -135,18 +168,12 @@ def run_eval(
     queries: list[dict],
     top_k: int = 5,
     sleep_between_rerank: float = RERANK_SLEEP_SECONDS,
+    skip_agent: bool = False,
 ) -> tuple[list[QueryResult], EvalSummary]:
-    """Run all queries, pacing rerank calls to stay under Cohere trial limits.
-
-    Pass ordering per query: no_rerank, rerank, filtered_rerank. Rerank and
-    filtered_rerank both hit Cohere; no_rerank doesn't. We sleep BEFORE each
-    rerank call (except the very first) so we never burst.
-    """
     results: list[QueryResult] = []
     rerank_calls_so_far = 0
 
     def _maybe_sleep_for_cohere() -> None:
-        # Only sleep before the SECOND rerank call onwards
         nonlocal rerank_calls_so_far
         if sleep_between_rerank > 0 and rerank_calls_so_far > 0:
             time.sleep(sleep_between_rerank)
@@ -160,13 +187,13 @@ def run_eval(
 
         print(f"[{idx}/{total_queries}] {q['id']}", file=sys.stderr)
 
-        # Pass 1: no rerank, no aspect filter (no Cohere call - no sleep)
+        # Pass 1: no rerank, JSON filters, no aspect filter
         no_rerank_run = run_one_pass(
             pipeline, q["query"], filters, None, expected,
             top_k, rerank=False, pass_label="no_rerank",
         )
 
-        # Pass 2: rerank, no aspect filter (Cohere call - pace it)
+        # Pass 2: rerank, JSON filters, no aspect filter
         _maybe_sleep_for_cohere()
         rerank_run = run_one_pass(
             pipeline, q["query"], filters, None, expected,
@@ -174,7 +201,7 @@ def run_eval(
         )
         runs = [no_rerank_run, rerank_run]
 
-        # Pass 3: rerank + aspect filter (Cohere call - pace it)
+        # Pass 3: rerank + JSON aspect filter
         if aspect_filter:
             _maybe_sleep_for_cohere()
             filtered_run = run_one_pass(
@@ -182,6 +209,36 @@ def run_eval(
                 top_k, rerank=True, pass_label="filtered_rerank",
             )
             runs.append(filtered_run)
+
+        # Pass 4: agent-inferred filters + rerank
+        if not skip_agent:
+            print(f"  ... running agent parse", file=sys.stderr)
+            agent_parse = run_agent_parse(q["query"])
+            agent_filters_dict = {
+                "area": agent_parse["area"],
+                "price_tier": agent_parse["price_tier"],
+            }
+            _maybe_sleep_for_cohere()
+            agent_run = run_one_pass(
+                pipeline,
+                # Use cleaned_query if parse was valid, else raw query
+                agent_parse["cleaned_query"],
+                agent_filters_dict,
+                agent_parse["aspect_positive"],
+                expected,
+                top_k,
+                rerank=True,
+                pass_label="agent_rerank",
+                agent_filters={
+                    "area": agent_parse["area"],
+                    "price_tier": agent_parse["price_tier"],
+                    "aspect_positive": agent_parse["aspect_positive"],
+                    "cleaned_query": agent_parse["cleaned_query"],
+                    "parse_valid": agent_parse["parse_valid"],
+                    "confidence": agent_parse["parse_confidence"],
+                },
+            )
+            runs.append(agent_run)
 
         results.append(QueryResult(
             id=q["id"],
@@ -208,7 +265,9 @@ def run_eval(
     no_rerank_m = _pass_metrics("no_rerank")
     rerank_m = _pass_metrics("rerank")
     filtered_m = _pass_metrics("filtered_rerank")
+    agent_m = _pass_metrics("agent_rerank")
 
+    # filter_lift: only fair to compute over queries that HAVE a filter.
     filter_eligible_ids = {
         q.id for q in results
         if any(r.pass_label == "filtered_rerank" for r in q.runs)
@@ -223,6 +282,9 @@ def run_eval(
     )
     filter_lift = (filtered_m.precision_at_k - rerank_baseline_for_filter) * 100.0
 
+    # agent_lift: agent vs vanilla rerank baseline (all queries)
+    agent_lift = (agent_m.precision_at_k - rerank_m.precision_at_k) * 100.0
+
     by_cat: dict = {}
     for r in results:
         cat = r.category
@@ -231,7 +293,9 @@ def run_eval(
             "passed_no_rerank": 0,
             "passed_rerank": 0,
             "passed_filtered_rerank": 0,
+            "passed_agent_rerank": 0,
             "n_filterable": 0,
+            "n_agent": 0,
         })
         slot["n"] += 1
         for run in r.runs:
@@ -243,14 +307,20 @@ def run_eval(
                 slot["n_filterable"] += 1
                 if run.passed:
                     slot["passed_filtered_rerank"] += 1
+            elif run.pass_label == "agent_rerank":
+                slot["n_agent"] += 1
+                if run.passed:
+                    slot["passed_agent_rerank"] += 1
 
     summary = EvalSummary(
         n_queries=n_queries,
         no_rerank=no_rerank_m,
         rerank=rerank_m,
         filtered_rerank=filtered_m,
+        agent_rerank=agent_m,
         rerank_lift_points=(rerank_m.precision_at_k - no_rerank_m.precision_at_k) * 100.0,
         filter_lift_points=filter_lift,
+        agent_lift_points=agent_lift,
         by_category=by_cat,
     )
     return results, summary
@@ -260,9 +330,9 @@ def run_eval(
 # Pretty printing
 # ---------------------------------------------------------------------------
 def print_human(results: list[QueryResult], summary: EvalSummary) -> None:
-    print("=" * 84)
+    print("=" * 90)
     print("HOOKAHLEDGER EVAL: precision@5 retrieval scoring")
-    print("=" * 84)
+    print("=" * 90)
     print()
 
     for r in results:
@@ -280,7 +350,7 @@ def print_human(results: list[QueryResult], summary: EvalSummary) -> None:
         print(f"  Query:    \"{r.query}\"{filter_str}")
         print(f"  Expected: {', '.join(r.expected_lounges)}")
 
-        for label in ("no_rerank", "rerank", "filtered_rerank"):
+        for label in ("no_rerank", "rerank", "filtered_rerank", "agent_rerank"):
             if label not in runs_by_label:
                 continue
             run = runs_by_label[label]
@@ -288,34 +358,53 @@ def print_human(results: list[QueryResult], summary: EvalSummary) -> None:
             display = label.replace("_", " ").ljust(16)
             surfaced = ", ".join(run.surfaced_lounges) or "(empty)"
             print(f"  {display} {marker}: {surfaced}")
+            if label == "agent_rerank" and run.agent_filters:
+                af = run.agent_filters
+                inferred = ", ".join(
+                    f"{k}={v}" for k, v in {
+                        "area": af.get("area"),
+                        "price_tier": af.get("price_tier"),
+                        "aspect_positive": af.get("aspect_positive"),
+                    }.items() if v
+                ) or "(none inferred)"
+                print(f"                     ↳ agent inferred: {inferred} "
+                      f"(conf {af.get('confidence', 0):.2f})")
         print()
 
-    print("=" * 84)
+    print("=" * 90)
     print("SUMMARY")
-    print("=" * 84)
+    print("=" * 90)
     nr = summary.no_rerank
     rr = summary.rerank
     fr = summary.filtered_rerank
-    print(f"  Queries:                    {summary.n_queries}")
-    print(f"  Pass 1: no rerank           {nr.n_passed}/{nr.n_eligible}  "
+    ar = summary.agent_rerank
+    print(f"  Queries:                       {summary.n_queries}")
+    print(f"  Pass 1: no rerank              {nr.n_passed}/{nr.n_eligible}  "
           f"= {nr.precision_at_k:.1%}")
-    print(f"  Pass 2: rerank              {rr.n_passed}/{rr.n_eligible}  "
+    print(f"  Pass 2: rerank                 {rr.n_passed}/{rr.n_eligible}  "
           f"= {rr.precision_at_k:.1%}")
     if fr.n_eligible:
-        print(f"  Pass 3: filtered + rerank   {fr.n_passed}/{fr.n_eligible}  "
+        print(f"  Pass 3: filtered + rerank      {fr.n_passed}/{fr.n_eligible}  "
               f"= {fr.precision_at_k:.1%}")
+    if ar.n_eligible:
+        print(f"  Pass 4: agent + rerank         {ar.n_passed}/{ar.n_eligible}  "
+              f"= {ar.precision_at_k:.1%}")
     print()
-    print(f"  Rerank lift (pass 2 vs 1):                {summary.rerank_lift_points:+.1f} pp")
+    print(f"  Rerank lift (pass 2 vs 1):                  {summary.rerank_lift_points:+.1f} pp")
     if fr.n_eligible:
-        print(f"  Filter lift (pass 3 vs 2 on same queries): {summary.filter_lift_points:+.1f} pp")
+        print(f"  Filter lift (pass 3 vs 2 on same queries):  {summary.filter_lift_points:+.1f} pp")
+    if ar.n_eligible:
+        print(f"  Agent lift (pass 4 vs 2):                   {summary.agent_lift_points:+.1f} pp")
     print()
     print("  By category:")
     for cat, stats in sorted(summary.by_category.items()):
         line = (f"    {cat:20s} no_rerank={stats['passed_no_rerank']}/{stats['n']}  "
                 f"rerank={stats['passed_rerank']}/{stats['n']}")
         if stats["n_filterable"]:
-            line += (f"  filtered_rerank={stats['passed_filtered_rerank']}"
+            line += (f"  filtered={stats['passed_filtered_rerank']}"
                      f"/{stats['n_filterable']}")
+        if stats["n_agent"]:
+            line += (f"  agent={stats['passed_agent_rerank']}/{stats['n_agent']}")
         print(line)
 
 
@@ -327,7 +416,9 @@ def main() -> None:
     parser.add_argument("--queries", default="tests/eval_queries.json")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--no-sleep", action="store_true",
-                        help="Skip pacing between Cohere calls. Only safe with a paid key.")
+                        help="Skip pacing between Cohere calls. Paid key only.")
+    parser.add_argument("--skip-agent", action="store_true",
+                        help="Skip the agent pass (v3 behaviour).")
     parser.add_argument("--json", action="store_true",
                         help="Emit machine-readable JSON to stdout")
     args = parser.parse_args()
@@ -346,21 +437,29 @@ def main() -> None:
     print(f"Loaded {len(queries)} queries from {queries_path.name}", file=sys.stderr)
 
     n_filtered = sum(1 for q in queries if q.get("aspect_filter"))
-    n_rerank_calls = len(queries) + n_filtered
+    n_agent = 0 if args.skip_agent else len(queries)
+    n_rerank_calls = len(queries) + n_filtered + n_agent
     sleep_seconds = 0.0 if args.no_sleep else RERANK_SLEEP_SECONDS
     estimated_minutes = (n_rerank_calls - 1) * sleep_seconds / 60.0
 
-    print(f"Will run {len(queries) * 2 + n_filtered} retrieval calls "
+    total_calls = len(queries) * 2 + n_filtered + n_agent
+    print(f"Will run {total_calls} retrieval calls "
           f"({len(queries)} no_rerank + {len(queries)} rerank + "
-          f"{n_filtered} filtered_rerank)", file=sys.stderr)
+          f"{n_filtered} filtered_rerank + {n_agent} agent_rerank)",
+          file=sys.stderr)
     print(f"Cohere usage: {n_rerank_calls} rerank calls", file=sys.stderr)
+    if n_agent:
+        print(f"Haiku usage: {n_agent} parse calls (~$0.005 total)",
+              file=sys.stderr)
     if sleep_seconds > 0:
         print(f"Pacing: {sleep_seconds}s between rerank calls "
               f"(~{estimated_minutes:.1f} min total wait)", file=sys.stderr)
     print(file=sys.stderr)
 
     results, summary = run_eval(
-        pipeline, queries, top_k=args.top_k, sleep_between_rerank=sleep_seconds,
+        pipeline, queries, top_k=args.top_k,
+        sleep_between_rerank=sleep_seconds,
+        skip_agent=args.skip_agent,
     )
 
     if args.json:
