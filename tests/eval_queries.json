@@ -1,0 +1,112 @@
+{
+  "version": 3,
+  "description": "Scored retrieval eval set for HookahLedger. Each query is scored precision@5 - 1 if any expected_lounge appears in top-5 retrieved, else 0. Queries are run with rerank, without rerank, and (when aspect_filter is set) with the aspect filter as well. The aspect_filter pass tests whether the system's built-in filtering rescues queries that struggle as bare semantic queries. Negative-evidence and thin-evidence queries are NOT in this file - they live as qualitative demo flows.",
+  "queries": [
+    {
+      "id": "baseline_01_flavour",
+      "category": "strong_baseline",
+      "query": "best flavour quality",
+      "filters": {},
+      "aspect_filter": "flavour_quality",
+      "expected_lounges": ["laika_soho", "globe_lounge_forest_gate"],
+      "rationale": "Laika 123 positive flavour, Globe 59. Bare query is hard because dense retrieval finds reviews that mention flavour, not lounges with the most positive flavour reviews. The aspect_filter pass tests whether explicit filtering rescues the query."
+    },
+    {
+      "id": "baseline_02_service_north",
+      "category": "strong_baseline",
+      "query": "best service in north london",
+      "filters": { "area": "North London" },
+      "aspect_filter": "service_speed",
+      "expected_lounges": [
+        "the_banc_seven_sisters",
+        "tigerbay_kingsbury",
+        "noya_harringay"
+      ],
+      "rationale": "Banc 379, Tigerbay 329, Noya 267 positive service. Top three in North London."
+    },
+    {
+      "id": "baseline_03_food_north",
+      "category": "strong_baseline",
+      "query": "best food in north london",
+      "filters": { "area": "North London" },
+      "aspect_filter": "food_quality",
+      "expected_lounges": ["noya_harringay", "the_banc_seven_sisters"],
+      "rationale": "Noya 201 positive food (pan-Asian + shisha), Banc 154. North London food anchors."
+    },
+    {
+      "id": "baseline_04_food_central",
+      "category": "strong_baseline",
+      "query": "best food in central london",
+      "filters": { "area": "Central London" },
+      "aspect_filter": "food_quality",
+      "expected_lounges": ["aldar_edgware", "basrah_edgware"],
+      "rationale": "Edgware Road Lebanese/Iraqi food anchors per inspect_data."
+    },
+    {
+      "id": "baseline_05_atmosphere",
+      "category": "strong_baseline",
+      "query": "best atmosphere",
+      "filters": {},
+      "aspect_filter": "atmosphere_vibe",
+      "expected_lounges": [
+        "noya_harringay",
+        "basrah_edgware",
+        "shisha_garden_edgware"
+      ],
+      "rationale": "Top three by atmosphere_vibe positive count: Noya 146, Basrah 123, Shisha Garden 101. The Banc was in the v2 expected list but its atmosphere count is below these three; corrected per inspect_data output. Bare query is fuzzy; aspect filter pass tests whether explicit filtering improves precision."
+    },
+    {
+      "id": "baseline_06_premium_mayfair",
+      "category": "strong_baseline",
+      "query": "premium experience in mayfair",
+      "filters": { "area": "Central London", "price_tier": "premium" },
+      "expected_lounges": ["drunch_mayfair"],
+      "rationale": "Drunch is the positive premium-Mayfair option; Mamounia is also premium Mayfair but value-negative. Drunch must be reachable in top 5. No aspect filter - the query is about overall premium experience, not a single aspect."
+    },
+    {
+      "id": "implicit_01_smooth_lasts",
+      "category": "implicit_aspect",
+      "query": "smooth shisha that lasts",
+      "filters": {},
+      "aspect_filter": "coal_management",
+      "expected_lounges": [
+        "globe_lounge_forest_gate",
+        "laika_soho",
+        "noya_harringay"
+      ],
+      "rationale": "Maps to coal_management positive without saying it. Globe and Laika tied at 23 positive coal each. Aspect filter tests whether the system can perform the implicit-aspect inference."
+    },
+    {
+      "id": "implicit_02_doesnt_run_out",
+      "category": "implicit_aspect",
+      "query": "lounge that doesn't run out of smoke",
+      "filters": {},
+      "aspect_filter": "coal_management",
+      "expected_lounges": ["globe_lounge_forest_gate", "laika_soho"],
+      "rationale": "Same coal_management target, different paraphrase. Tests retrieval robustness to vibes-language."
+    },
+    {
+      "id": "implicit_03_date_night",
+      "category": "implicit_aspect",
+      "query": "somewhere I won't be embarrassed bringing a date",
+      "filters": {},
+      "aspect_filter": "atmosphere_vibe",
+      "expected_lounges": [
+        "noya_harringay",
+        "basrah_edgware",
+        "mamounia_mayfair",
+        "drunch_mayfair"
+      ],
+      "rationale": "Maps to atmosphere_vibe + seating + premium. Wide expected list because date-night is genuinely fuzzy. Mamounia included for atmosphere (positive) despite value being negative."
+    },
+    {
+      "id": "multi_01_north_mid_food",
+      "category": "multi_constraint",
+      "query": "best mid-tier shisha under 25 with good food in north london",
+      "filters": { "area": "North London", "price_tier": "mid" },
+      "aspect_filter": "food_quality",
+      "expected_lounges": ["the_banc_seven_sisters", "shisha_garden_edgware"],
+      "rationale": "Both Banc and Shisha Garden Edgware are mid-tier North London. Banc has stronger food signal (154 positive vs Shisha Garden's 64). Either is a defensible top-5 surface."
+    }
+  ]
+}

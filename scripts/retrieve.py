@@ -290,6 +290,7 @@ class RetrievalPipeline:
         return flat
 
     # -------- Step 6: Cohere rerank ----------------------------------------
+
     def _rerank(
         self,
         query: str,
@@ -301,6 +302,11 @@ class RetrievalPipeline:
 
         Final score: cohere_relevance * (recency_floor + (1-recency_floor) * recency).
         Recency only nudges - the reranker's relevance is the dominant signal.
+
+        On Cohere failure (429, 5xx, network), falls back to similarity *
+        recency ordering using DEFAULT_RECENCY_FLOOR (the no-rerank floor),
+        logs a warning to stderr, and returns the chunks. The query still
+        completes; the user just gets a degraded ranking instead of a crash.
         """
         if not chunks:
             return chunks
@@ -314,12 +320,47 @@ class RetrievalPipeline:
         # 'Review:' suffix) but the metadata prefix actually helps the
         # reranker make use of lounge name / area when the query mentions them.
         documents = [c.document for c in chunks]
-        response = self._cohere_client.rerank(
-            model=rerank_model,
-            query=query,
-            documents=documents,
-            top_n=len(documents),
-        )
+        try:
+            response = self._cohere_client.rerank(
+                model=rerank_model,
+                query=query,
+                documents=documents,
+                top_n=len(documents),
+            )
+        except Exception as e:
+            print(
+                f"[retrieve] Cohere rerank failed ({type(e).__name__}: {e}). "
+                f"Falling back to similarity-weighted ordering.",
+                file=sys.stderr,
+            )
+            # Rescore with the no-rerank recency floor. Chunks already have
+            # similarity computed; just recompute score with the harsher floor
+            # since we no longer have the reranker doing the heavy lifting.
+            fallback_floor = DEFAULT_RECENCY_FLOOR
+            fallback: list[RetrievedChunk] = []
+            for c in chunks:
+                recency_factor = (
+                    fallback_floor + (1.0 - fallback_floor) * c.recency_weight
+                )
+                fallback.append(RetrievedChunk(
+                    review_id=c.review_id,
+                    lounge_id=c.lounge_id,
+                    lounge_name=c.lounge_name,
+                    area=c.area,
+                    neighbourhood=c.neighbourhood,
+                    price_tier=c.price_tier,
+                    review_date=c.review_date,
+                    recency_weight=c.recency_weight,
+                    document=c.document,
+                    distance=c.distance,
+                    similarity=c.similarity,
+                    score=c.similarity * recency_factor,
+                    cohere_relevance=None,
+                    aspects_csv=c.aspects_csv,
+                    aspect_sentiments_csv=c.aspect_sentiments_csv,
+                ))
+            fallback.sort(key=lambda c: c.score, reverse=True)
+            return fallback
 
         # Cohere returns results in ranked order with `index` pointing back
         # to the original list. Rebuild the list in that order, attaching
@@ -348,6 +389,7 @@ class RetrievalPipeline:
         # Sort by the new score (in case the recency nudge reordered things)
         reranked.sort(key=lambda c: c.score, reverse=True)
         return reranked
+
 
     # -------- Step 3: SQLite counts ----------------------------------------
     def _fetch_counts(self, lounge_ids: list[str]) -> dict[str, dict]:

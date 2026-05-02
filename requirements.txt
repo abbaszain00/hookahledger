@@ -1,0 +1,10 @@
+anthropic==0.97.0
+chromadb==1.5.8
+cohere==6.1.0
+google-genai==1.74.0
+openai==2.33.0
+pandas==3.0.2
+protobuf==7.34.1
+python-dotenv==1.2.2
+sentence_transformers==5.4.1
+tqdm==4.67.3

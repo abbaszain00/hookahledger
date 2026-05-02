@@ -144,8 +144,13 @@ def normalise_for_compare(s: str) -> str:
 
 
 def extract_quotes(text: str) -> list[str]:
-    """Pull every double-quoted span out of the answer."""
-    return QUOTE_PATTERN.findall(text)
+    """Pull every double-quoted span out of the answer.
+
+    Normalises the text first so smart quotes are mapped to straight quotes
+    before the regex runs - otherwise a Sonnet response using curly quotes
+    would slip past extraction entirely and never reach validation.
+    """
+    return QUOTE_PATTERN.findall(normalise_for_compare(text))
 
 
 def validate_quote(quote: str, verified_quotes: dict) -> bool:
@@ -170,7 +175,12 @@ def neutralise_invalid_quotes(text: str, verified_quotes: dict) -> tuple[str, li
     reader knows the system flagged it. We keep the inline content rather
     than redacting outright because (a) it's still useful context and (b)
     deleting text mid-paragraph leaves grammatical wreckage.
+
+    The input text is normalised first (smart quotes -> straight quotes etc).
+    Without normalisation, Sonnet responses using curly quotes would never
+    match the regex and would skip validation silently.
     """
+    normalised = normalise_for_compare(text)
     validations: list[QuoteValidation] = []
 
     def _replace(match: re.Match) -> str:
@@ -181,7 +191,7 @@ def neutralise_invalid_quotes(text: str, verified_quotes: dict) -> tuple[str, li
             return f'"{original}"'
         return f"{original} [unverified]"
 
-    new_text = QUOTE_PATTERN.sub(_replace, text)
+    new_text = QUOTE_PATTERN.sub(_replace, normalised)
     return new_text, validations
 
 
