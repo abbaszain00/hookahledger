@@ -30,7 +30,19 @@ const ASPECTS = [
   { value: "wait_time", label: "Wait time" },
 ];
 
+// Human labels for aspect codes when surfaced in the inferred-filters pill row.
+const ASPECT_LABELS = Object.fromEntries(
+  ASPECTS.filter((a) => a.value).map((a) => [a.value, a.label]),
+);
+
+// Human labels for price-tier codes.
+const PRICE_LABELS = Object.fromEntries(
+  PRICE_TIERS.filter((p) => p.value).map((p) => [p.value, p.label]),
+);
+
 export default function App() {
+  const [mode, setMode] = useState("filtered"); // "filtered" | "agent"
+
   const [query, setQuery] = useState("");
   const [area, setArea] = useState("");
   const [priceTier, setPriceTier] = useState("");
@@ -41,12 +53,15 @@ export default function App() {
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
 
+  // Agent-only state
+  const [statusMessage, setStatusMessage] = useState(null); // current phase blurb
+  const [parsed, setParsed] = useState(null); // parsed event payload
+
   // Hold the EventSource so we can close it on unmount or on a new query
   const eventSourceRef = useRef(null);
 
   useEffect(() => {
     return () => {
-      // Cleanup on unmount
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }
@@ -56,7 +71,6 @@ export default function App() {
   function handleSubmit() {
     if (!query.trim() || streaming) return;
 
-    // Tear down any prior stream
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
@@ -66,21 +80,54 @@ export default function App() {
     setStreamingText("");
     setError(null);
     setResult(null);
+    setStatusMessage(null);
+    setParsed(null);
 
-    // Build the URL with query params (EventSource only supports GET)
-    const params = new URLSearchParams({ query: query.trim() });
-    if (area) params.set("area", area);
-    if (priceTier) params.set("price_tier", priceTier);
-    if (aspectPositive) params.set("aspect_positive", aspectPositive);
+    // Build the URL. Filtered path takes user-set filters as params;
+    // agent path takes only the query.
+    let url;
+    if (mode === "agent") {
+      const params = new URLSearchParams({ query: query.trim() });
+      url = `${API_BASE}/api/agent/stream?${params.toString()}`;
+    } else {
+      const params = new URLSearchParams({ query: query.trim() });
+      if (area) params.set("area", area);
+      if (priceTier) params.set("price_tier", priceTier);
+      if (aspectPositive) params.set("aspect_positive", aspectPositive);
+      url = `${API_BASE}/api/chat/stream?${params.toString()}`;
+    }
 
-    const url = `${API_BASE}/api/chat/stream?${params.toString()}`;
     const es = new EventSource(url);
     eventSourceRef.current = es;
+
+    // Status events: agent path only. Inline phase line that updates in place.
+    es.addEventListener("status", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        setStatusMessage(data.message);
+      } catch (err) {
+        console.error("Failed to parse status:", err, e.data);
+      }
+    });
+
+    // Parsed event: agent path only. Fires once the parse + validate nodes
+    // have run. May contain mostly-null fields if parse_valid is false.
+    es.addEventListener("parsed", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        setParsed(data);
+      } catch (err) {
+        console.error("Failed to parse parsed event:", err, e.data);
+      }
+    });
 
     es.addEventListener("token", (e) => {
       try {
         const chunk = JSON.parse(e.data);
         setStreamingText((prev) => prev + chunk);
+        // First token means generation has started; clear the status line so
+        // the answer can take over the visual focus.
+        setStatusMessage(null);
       } catch (err) {
         console.error("Failed to parse token:", err, e.data);
       }
@@ -90,6 +137,11 @@ export default function App() {
       try {
         const evidence = JSON.parse(e.data);
         setResult(evidence);
+        // If the agent block came in here as well, prefer it over the standalone
+        // parsed event (same data, but the evidence block is canonical).
+        if (evidence.agent) {
+          setParsed((prev) => ({ ...(prev || {}), ...evidence.agent }));
+        }
       } catch (err) {
         console.error("Failed to parse evidence:", err);
         setError("Failed to parse evidence event");
@@ -100,12 +152,10 @@ export default function App() {
       es.close();
       eventSourceRef.current = null;
       setStreaming(false);
+      setStatusMessage(null);
     });
 
     es.addEventListener("error", (e) => {
-      // EventSource fires 'error' for both server-sent error events AND
-      // network/connection failures. The server-sent ones have a data field;
-      // network errors don't.
       const data = e.data;
       if (data) {
         try {
@@ -115,8 +165,6 @@ export default function App() {
           setError("Server error during streaming");
         }
       } else {
-        // Connection error - only show if we weren't already done
-        // (EventSource fires error after a clean close too)
         if (eventSourceRef.current === es) {
           setError("Connection lost during streaming");
         }
@@ -124,6 +172,7 @@ export default function App() {
       es.close();
       eventSourceRef.current = null;
       setStreaming(false);
+      setStatusMessage(null);
     });
   }
 
@@ -134,10 +183,29 @@ export default function App() {
     }
   }
 
+  function handleModeChange(next) {
+    if (streaming) return;
+    setMode(next);
+    // Clear results when switching modes so the user doesn't see filtered-mode
+    // output sitting next to an agent-mode query box.
+    setResult(null);
+    setStreamingText("");
+    setError(null);
+    setStatusMessage(null);
+    setParsed(null);
+  }
+
   // Decide what text to display: validated text from the evidence event if
   // we have it, otherwise the in-progress streaming text.
   const displayedText = result?.answer_validated ?? streamingText;
-  const showAnswerCard = streaming || streamingText || result;
+  const showAnswerCard =
+    streaming || streamingText || result || statusMessage || parsed;
+
+  // Build the placeholder so it hints at the right kind of query for the mode.
+  const placeholder =
+    mode === "agent"
+      ? "e.g. somewhere with great atmosphere in north london under £25"
+      : "e.g. best service in north london";
 
   return (
     <div className="min-h-screen bg-stone-50">
@@ -150,40 +218,49 @@ export default function App() {
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-8">
-          {/* Sidebar */}
-          <aside className="space-y-4">
-            <FilterSelect
-              label="Area"
-              value={area}
-              onChange={setArea}
-              options={AREAS}
-              disabled={streaming}
-            />
-            <FilterSelect
-              label="Price tier"
-              value={priceTier}
-              onChange={setPriceTier}
-              options={PRICE_TIERS}
-              disabled={streaming}
-            />
-            <FilterSelect
-              label="Aspect"
-              value={aspectPositive}
-              onChange={setAspectPositive}
-              options={ASPECTS}
-              disabled={streaming}
-            />
-          </aside>
+          {/* Sidebar - hidden in agent mode */}
+          {mode === "filtered" && (
+            <aside className="space-y-4">
+              <FilterSelect
+                label="Area"
+                value={area}
+                onChange={setArea}
+                options={AREAS}
+                disabled={streaming}
+              />
+              <FilterSelect
+                label="Price tier"
+                value={priceTier}
+                onChange={setPriceTier}
+                options={PRICE_TIERS}
+                disabled={streaming}
+              />
+              <FilterSelect
+                label="Aspect"
+                value={aspectPositive}
+                onChange={setAspectPositive}
+                options={ASPECTS}
+                disabled={streaming}
+              />
+            </aside>
+          )}
 
-          {/* Main column */}
-          <main>
+          {/* Main column - spans full width when sidebar is hidden */}
+          <main className={mode === "agent" ? "md:col-span-2" : ""}>
+            {/* Mode toggle */}
+            <ModeToggle
+              mode={mode}
+              onChange={handleModeChange}
+              disabled={streaming}
+            />
+
             <div className="flex gap-2 mb-6">
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="e.g. best service in north london"
+                placeholder={placeholder}
                 className="flex-1 px-4 py-2 border border-stone-300 rounded focus:outline-none focus:border-stone-500"
                 disabled={streaming}
               />
@@ -204,6 +281,11 @@ export default function App() {
 
             {showAnswerCard && (
               <div className="space-y-6">
+                {/* Inferred filters - agent mode only */}
+                {mode === "agent" && parsed && (
+                  <InferredFilters parsed={parsed} />
+                )}
+
                 {/* Answer */}
                 <div className="p-6 bg-white border border-stone-200 rounded">
                   <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3 flex items-center gap-2">
@@ -211,13 +293,18 @@ export default function App() {
                     {streaming && (
                       <span className="inline-block w-2 h-2 rounded-full bg-stone-400 animate-pulse" />
                     )}
+                    {statusMessage && (
+                      <span className="text-stone-400 normal-case font-normal tracking-normal italic ml-2">
+                        {statusMessage}
+                      </span>
+                    )}
                   </h2>
                   <div className="prose prose-stone prose-sm max-w-none">
                     {displayedText ? (
                       <ReactMarkdown>{displayedText}</ReactMarkdown>
                     ) : (
                       <span className="text-stone-400 italic">
-                        Searching reviews…
+                        {statusMessage || "Searching reviews…"}
                       </span>
                     )}
                   </div>
@@ -240,13 +327,21 @@ export default function App() {
 
                 {/* Metadata */}
                 {result && (
-                  <div className="text-xs text-stone-500 pt-4 border-t border-stone-200">
-                    {result.candidates_pulled} candidates pulled ·{" "}
-                    {result.chunks?.length || 0} chunks · {result.tokens_in} in
-                    / {result.tokens_out} out · ${result.cost_usd?.toFixed(4)} ·{" "}
-                    {result.quote_validations?.filter((v) => v.valid).length ||
-                      0}
-                    /{result.quote_validations?.length || 0} quotes verified
+                  <div className="text-xs text-stone-500 pt-4 border-t border-stone-200 space-y-2">
+                    {result.degraded && (
+                      <div className="inline-block px-2 py-1 bg-amber-50 border border-amber-200 rounded text-amber-900">
+                        Partial response - stream interrupted before completion.
+                      </div>
+                    )}
+                    <div>
+                      {result.candidates_pulled} candidates pulled ·{" "}
+                      {result.chunks?.length || 0} chunks · {result.tokens_in}{" "}
+                      in / {result.tokens_out} out · $
+                      {result.cost_usd?.toFixed(4)} ·{" "}
+                      {result.quote_validations?.filter((v) => v.valid)
+                        .length || 0}
+                      /{result.quote_validations?.length || 0} quotes verified
+                    </div>
                   </div>
                 )}
               </div>
@@ -254,6 +349,102 @@ export default function App() {
           </main>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ModeToggle({ mode, onChange, disabled }) {
+  return (
+    <div className="mb-4 inline-flex p-1 bg-stone-200 rounded">
+      <button
+        onClick={() => onChange("filtered")}
+        disabled={disabled}
+        className={`px-4 py-1.5 text-sm font-medium rounded transition ${
+          mode === "filtered"
+            ? "bg-white text-stone-900 shadow-sm"
+            : "text-stone-600 hover:text-stone-900"
+        } disabled:opacity-50 disabled:cursor-not-allowed`}
+      >
+        Filtered
+      </button>
+      <button
+        onClick={() => onChange("agent")}
+        disabled={disabled}
+        className={`px-4 py-1.5 text-sm font-medium rounded transition ${
+          mode === "agent"
+            ? "bg-white text-stone-900 shadow-sm"
+            : "text-stone-600 hover:text-stone-900"
+        } disabled:opacity-50 disabled:cursor-not-allowed`}
+      >
+        Agent
+      </button>
+    </div>
+  );
+}
+
+function InferredFilters({ parsed }) {
+  // Build pill list from whichever fields the parser populated.
+  const pills = [];
+  if (parsed.area)
+    pills.push({ key: "area", label: "Area", value: parsed.area });
+  if (parsed.price_tier)
+    pills.push({
+      key: "price",
+      label: "Price",
+      value: PRICE_LABELS[parsed.price_tier] || parsed.price_tier,
+    });
+  if (parsed.aspect_positive)
+    pills.push({
+      key: "aspect",
+      label: "Aspect",
+      value: ASPECT_LABELS[parsed.aspect_positive] || parsed.aspect_positive,
+    });
+
+  // parse_valid === false means the parser bailed (low confidence, schema fail,
+  // API error). Show that rather than an empty pill row so the user understands
+  // why no filters were applied.
+  const parseFailed = parsed.parse_valid === false;
+  const noFilters = pills.length === 0 && !parseFailed;
+
+  return (
+    <div className="p-4 bg-stone-100 border border-stone-200 rounded">
+      <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-2">
+        Inferred from your query
+      </div>
+      {parseFailed ? (
+        <div className="text-sm text-stone-600 italic">
+          Could not infer structured filters
+          {parsed.validation_reason
+            ? ` (${parsed.validation_reason}).`
+            : "."}{" "}
+          Falling back to unfiltered retrieval.
+        </div>
+      ) : noFilters ? (
+        <div className="text-sm text-stone-600 italic">
+          No filters inferred - searching all lounges.
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {pills.map((p) => (
+            <span
+              key={p.key}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-stone-300 rounded text-xs"
+            >
+              <span className="text-stone-500">{p.label}:</span>
+              <span className="font-medium text-stone-900">{p.value}</span>
+            </span>
+          ))}
+          {parsed.cleaned_query &&
+            parsed.cleaned_query !== parsed.raw_query && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-stone-300 rounded text-xs">
+                <span className="text-stone-500">Searching for:</span>
+                <span className="font-medium text-stone-900 italic">
+                  "{parsed.cleaned_query}"
+                </span>
+              </span>
+            )}
+        </div>
+      )}
     </div>
   );
 }
