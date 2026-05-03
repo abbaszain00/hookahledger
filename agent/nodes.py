@@ -105,10 +105,11 @@ The query may contain:
 - A specific aspect being asked about (good service, smooth shisha, food quality, etc)
 - Or none of these - a general "best lounge" query
 
+You must also classify whether the query is about shisha lounges at all. Set is_in_taxonomy=False ONLY for queries that are clearly off-topic (weather, sports, news, generic chat, coding help, unrelated cuisines, etc). Set is_in_taxonomy=True for anything that could plausibly be answered from shisha lounge reviews, even if it's vague or you can't extract structured filters from it.
+
 Use the extract_query_filters tool to return your parse. Always call the tool exactly once.
 
-Be conservative: if you're not sure whether the query implies a filter, return null for that field rather than guessing. Confidence below 0.5 means the query is too vague to filter on - the system will fall back to unfiltered retrieval."""
-
+Be conservative on filters: if you're not sure whether the query implies a filter, return null for that field rather than guessing. Confidence below 0.5 means the query is too vague to filter on - the system will fall back to unfiltered retrieval."""
 
 def parse_query(state: AgentState) -> dict[str, Any]:
     """Call Haiku with the extract_query_filters tool to parse the user's query.
@@ -166,6 +167,7 @@ def parse_query(state: AgentState) -> dict[str, Any]:
         "price_tier": parsed.price_tier,
         "aspect_positive": parsed.aspect_positive,
         "parse_confidence": parsed.confidence,
+        "is_in_taxonomy": parsed.is_in_taxonomy,
     }
 
 
@@ -222,12 +224,65 @@ def validate_parse(state: AgentState) -> dict[str, Any]:
         "validation_reason": "ok",
     }
 
+# ---------------------------------------------------------------------------
+# Node 2b: decline (terminal node for off-taxonomy queries)
+# ---------------------------------------------------------------------------
+DECLINE_MESSAGE = (
+    "I can only answer questions about London shisha lounges - their service, "
+    "atmosphere, flavour and coal management, prices, food, seating, wait times, "
+    "and locations across North, Central, East, South and West London. "
+    "Try asking about lounges, areas, or what experience you're looking for."
+)
+
+
+def decline_query(state: AgentState) -> dict[str, Any]:
+    """Terminal node for queries the parser flagged as off-taxonomy.
+
+    Returns a hardcoded scoped decline message rather than calling Sonnet.
+    No retrieval runs, no generation runs - we save the cost and return
+    something useful to the user immediately.
+    """
+    return {
+        "is_declined": True,
+        "decline_reason": "off-taxonomy",
+        # Synthesise a minimal answer_result so downstream code that expects
+        # one (the FastAPI handler) doesn't have to special-case None. Set
+        # cost/tokens to 0 since we didn't call Sonnet.
+        "answer_result": _DeclinedAnswer(text=DECLINE_MESSAGE),
+    }
+
+
+# Lightweight stand-in so app/main.py can read .text, .text_validated, etc
+# off the answer_result without crashing. Mirrors the AnswerResult fields
+# the SSE handler actually reads.
+class _DeclinedAnswer:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.text_validated = text
+        self.quote_validations: list = []
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.cost_usd = 0.0
 
 # ---------------------------------------------------------------------------
 # Conditional edge: route to filtered or unfiltered retrieval
 # ---------------------------------------------------------------------------
 def route_after_validation(state: AgentState) -> str:
-    """Conditional edge function. Returns the name of the next node."""
+    """Route after validate_parse based on parse outcome.
+
+    Three branches:
+      1. Off-taxonomy query (parser said is_in_taxonomy=False) -> decline.
+         Skip retrieval and generation entirely.
+      2. Valid parse -> retrieve_with_filters.
+      3. Invalid parse (low confidence, error, schema fail) -> retrieve_no_filter.
+
+    Note we route to decline only when is_in_taxonomy is explicitly False.
+    None (parse failed before classifying) defaults to the existing
+    no-filter fallback so off-topic queries that ALSO crash the parser
+    still get handled gracefully (just not as cheaply).
+    """
+    if state.is_in_taxonomy is False:
+        return "decline_query"
     if state.parse_valid:
         return "retrieve_with_filters"
     return "retrieve_no_filter"

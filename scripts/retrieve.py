@@ -132,6 +132,7 @@ class RetrievalResult:
     candidates_pulled: int
     chunks: list[RetrievedChunk]
     lounges: list[LoungeEvidence]
+    rerank_succeeded: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +507,7 @@ class RetrievalPipeline:
                 candidates_pulled=0,
                 chunks=[],
                 lounges=[],
+                rerank_succeeded=True,
             )
 
         candidates_pulled = len(raw["ids"][0])
@@ -520,8 +522,17 @@ class RetrievalPipeline:
             pool = aggregated[:rerank_pool]
             reranked = self._rerank(query, pool, recency_floor, rerank_model)
             top_chunks = reranked[:top_k]
+            # Sniff whether Cohere actually fired or _rerank fell back to
+            # similarity-weighted ordering. The fallback path leaves
+            # cohere_relevance=None on every chunk; the success path
+            # overwrites it with the rerank-v3.5 score. Empty result defaults
+            # to True (no rerank to fail).
+            rerank_succeeded = (
+                bool(top_chunks) and top_chunks[0].cohere_relevance is not None
+            ) or not top_chunks
         else:
             top_chunks = aggregated[:top_k]
+            rerank_succeeded = True  # not applicable, but True is least misleading
 
         # Step 3: pull counts for surviving lounges
         unique_lounges = list({c.lounge_id for c in top_chunks})
@@ -552,6 +563,7 @@ class RetrievalPipeline:
             candidates_pulled=candidates_pulled,
             chunks=top_chunks,
             lounges=lounges,
+            rerank_succeeded=rerank_succeeded,
         )
 
 

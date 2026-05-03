@@ -49,11 +49,15 @@ class AgentState(BaseModel):
     price_tier: Optional[str] = None
     aspect_positive: Optional[str] = None
     parse_confidence: float = 0.0
+    is_in_taxonomy: Optional[bool] = None  # set by parse; None if parse failed
     parse_error: Optional[str] = None  # populated if the LLM call failed
 
     # ---- Validation output (set by validate_parse node) ----
     parse_valid: Optional[bool] = None
     validation_reason: Optional[str] = None
+    is_declined: bool = False
+    decline_reason: Optional[str] = None
+    
 
     # ---- Retrieval output (set by retrieve_* node) ----
     # Loose type to avoid circular imports. Holds a RetrievalResult dataclass.
@@ -127,5 +131,20 @@ class ParsedQuery(BaseModel):
             "queries with explicit area/aspect signals. 0.5-0.8 for ambiguous "
             "queries where you inferred filters from context. Below 0.5 if "
             "the query is too vague to parse reliably."
+        ),
+    )
+
+    is_in_taxonomy: bool = Field(
+        ...,
+        description=(
+            "Whether the query is about London shisha lounges (their reviews, "
+            "service, atmosphere, prices, locations, food, shisha quality, "
+            "etc). Return True for any query that could plausibly be answered "
+            "from a database of shisha lounge reviews, even if vague (e.g. "
+            "'best lounge', 'somewhere chilled'). Return False ONLY for "
+            "queries that are clearly off-topic: weather, sports, generic "
+            "chat, coding help, other cuisines, hotels, news, etc. When in "
+            "doubt, return True - the downstream pipeline handles ambiguous "
+            "queries gracefully."
         ),
     )

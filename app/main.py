@@ -269,6 +269,7 @@ def chat_stream(
                 "tokens_out": tokens_out,
                 "cost_usd": cost_usd,
                 "degraded": stream_failed,
+                "rerank_succeeded": retrieval.rerank_succeeded,
                 "lounges": [
                     {
                         **{k: v for k, v in asdict(lg).items() if k != "chunks"},
@@ -494,6 +495,7 @@ def agent_stream(query: str, top_k: int = 5):
                 "tokens_out": tokens_out,
                 "cost_usd": cost_usd,
                 "degraded": stream_failed,
+                "rerank_succeeded": retrieval.rerank_succeeded,
                 "lounges": [
                     {
                         **{k: v for k, v in asdict(lg).items() if k != "chunks"},

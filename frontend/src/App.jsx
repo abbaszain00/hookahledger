@@ -328,11 +328,20 @@ export default function App() {
                 {/* Metadata */}
                 {result && (
                   <div className="text-xs text-stone-500 pt-4 border-t border-stone-200 space-y-2">
-                    {result.degraded && (
-                      <div className="inline-block px-2 py-1 bg-amber-50 border border-amber-200 rounded text-amber-900">
-                        Partial response - stream interrupted before completion.
-                      </div>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {result.degraded && (
+                        <div className="inline-block px-2 py-1 bg-amber-50 border border-amber-200 rounded text-amber-900">
+                          Partial response - stream interrupted before
+                          completion.
+                        </div>
+                      )}
+                      {result.rerank_succeeded === false && (
+                        <div className="inline-block px-2 py-1 bg-amber-50 border border-amber-200 rounded text-amber-900">
+                          Rerank unavailable - results ordered by similarity +
+                          recency only.
+                        </div>
+                      )}
+                    </div>
                     <div>
                       {result.candidates_pulled} candidates pulled ·{" "}
                       {result.chunks?.length || 0} chunks · {result.tokens_in}{" "}

@@ -45,6 +45,7 @@ from agent.nodes import (
     retrieve_with_filters,
     retrieve_no_filter,
     generate_answer,
+    decline_query,
     route_after_validation,
 )
 
@@ -63,18 +64,20 @@ def build_graph():
     workflow.add_node("retrieve_with_filters", retrieve_with_filters)
     workflow.add_node("retrieve_no_filter", retrieve_no_filter)
     workflow.add_node("generate_answer", generate_answer)
+    workflow.add_node("decline_query", decline_query)
 
     # Linear edges: START -> parse_query -> validate_parse
     workflow.add_edge(START, "parse_query")
     workflow.add_edge("parse_query", "validate_parse")
 
-    # Conditional edge: validate_parse routes to one of two retrieval nodes
+    # Conditional edge: validate_parse routes to one of three nodes
     workflow.add_conditional_edges(
         "validate_parse",
         route_after_validation,
         {
             "retrieve_with_filters": "retrieve_with_filters",
             "retrieve_no_filter": "retrieve_no_filter",
+            "decline_query": "decline_query",
         },
     )
 
@@ -82,6 +85,8 @@ def build_graph():
     workflow.add_edge("retrieve_with_filters", "generate_answer")
     workflow.add_edge("retrieve_no_filter", "generate_answer")
     workflow.add_edge("generate_answer", END)
+    # Decline is terminal - no retrieval, no generation
+    workflow.add_edge("decline_query", END)
 
     return workflow.compile()
 
