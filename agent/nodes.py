@@ -22,8 +22,10 @@ Design notes:
 
 from __future__ import annotations
 
-import json
 import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+import json
 import sys
 from pathlib import Path
 from typing import Any

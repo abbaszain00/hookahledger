@@ -33,6 +33,9 @@ each invocation gets its own state instance.
 
 from __future__ import annotations
 
+import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
 from langgraph.graph import StateGraph, START, END
 
 from agent.state import AgentState
