@@ -209,8 +209,14 @@ def chat_stream(
 
     SSE event shape:
       event: token       data: <chunk text>
-      event: evidence    data: <json blob>
+      event: error       data: {"error": "..."}        (only on stream failure)
+      event: evidence    data: <json blob, includes degraded:bool>
       event: done        data: {}
+
+    Validation runs in a finally block so a stream error never bypasses
+    neutralise_invalid_quotes. The evidence event always fires (with
+    degraded:true on failure) so the frontend can render whatever partial
+    answer was received with hallucinated quotes neutralised.
     """
     if _engine is None:
         raise HTTPException(status_code=503, detail="Engine not loaded yet")
@@ -231,6 +237,7 @@ def chat_stream(
         chunks: list[str] = []
         tokens_in = 0
         tokens_out = 0
+        stream_failed = False
         try:
             with _engine.client.messages.stream(
                 model=_engine.model,
@@ -246,33 +253,34 @@ def chat_stream(
                     tokens_in = final.usage.input_tokens
                     tokens_out = final.usage.output_tokens
         except Exception as e:
+            stream_failed = True
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-            return
+        finally:
+            full_text = "".join(chunks)
+            text_validated, validations = neutralise_invalid_quotes(full_text, verified_quotes)
+            cost_usd = (tokens_in / 1_000_000) * 3.0 + (tokens_out / 1_000_000) * 15.0
 
-        full_text = "".join(chunks)
-        text_validated, validations = neutralise_invalid_quotes(full_text, verified_quotes)
-        cost_usd = (tokens_in / 1_000_000) * 3.0 + (tokens_out / 1_000_000) * 15.0
-
-        evidence = {
-            "answer_validated": text_validated,
-            "quote_validations": [
-                {"quote": v.quote, "valid": v.valid} for v in validations
-            ],
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "cost_usd": cost_usd,
-            "lounges": [
-                {
-                    **{k: v for k, v in asdict(lg).items() if k != "chunks"},
-                    "chunks": [asdict(c) for c in lg.chunks],
-                }
-                for lg in retrieval.lounges
-            ],
-            "chunks": [asdict(c) for c in retrieval.chunks],
-            "candidates_pulled": retrieval.candidates_pulled,
-        }
-        yield f"event: evidence\ndata: {json.dumps(evidence)}\n\n"
-        yield f"event: done\ndata: {{}}\n\n"
+            evidence = {
+                "answer_validated": text_validated,
+                "quote_validations": [
+                    {"quote": v.quote, "valid": v.valid} for v in validations
+                ],
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": cost_usd,
+                "degraded": stream_failed,
+                "lounges": [
+                    {
+                        **{k: v for k, v in asdict(lg).items() if k != "chunks"},
+                        "chunks": [asdict(c) for c in lg.chunks],
+                    }
+                    for lg in retrieval.lounges
+                ],
+                "chunks": [asdict(c) for c in retrieval.chunks],
+                "candidates_pulled": retrieval.candidates_pulled,
+            }
+            yield f"event: evidence\ndata: {json.dumps(evidence)}\n\n"
+            yield f"event: done\ndata: {{}}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -453,6 +461,7 @@ def agent_stream(query: str, top_k: int = 5):
         chunks: list[str] = []
         tokens_in = 0
         tokens_out = 0
+        stream_failed = False
         try:
             with _engine.client.messages.stream(
                 model=_engine.model,
@@ -468,44 +477,45 @@ def agent_stream(query: str, top_k: int = 5):
                     tokens_in = final.usage.input_tokens
                     tokens_out = final.usage.output_tokens
         except Exception as e:
+            stream_failed = True
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-            return
+        finally:
+            # Phase 5: quote validation + evidence event (runs on success and failure)
+            full_text = "".join(chunks)
+            text_validated, validations = neutralise_invalid_quotes(full_text, verified_quotes)
+            cost_usd = (tokens_in / 1_000_000) * 3.0 + (tokens_out / 1_000_000) * 15.0
 
-        # Phase 5: quote validation + evidence event
-        full_text = "".join(chunks)
-        text_validated, validations = neutralise_invalid_quotes(full_text, verified_quotes)
-        cost_usd = (tokens_in / 1_000_000) * 3.0 + (tokens_out / 1_000_000) * 15.0
-
-        evidence = {
-            "answer_validated": text_validated,
-            "quote_validations": [
-                {"quote": v.quote, "valid": v.valid} for v in validations
-            ],
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "cost_usd": cost_usd,
-            "lounges": [
-                {
-                    **{k: v for k, v in asdict(lg).items() if k != "chunks"},
-                    "chunks": [asdict(c) for c in lg.chunks],
-                }
-                for lg in retrieval.lounges
-            ],
-            "chunks": [asdict(c) for c in retrieval.chunks],
-            "candidates_pulled": retrieval.candidates_pulled,
-            "agent": {
-                "area": state.area,
-                "price_tier": state.price_tier,
-                "aspect_positive": state.aspect_positive,
-                "cleaned_query": state.cleaned_query,
-                "parse_confidence": state.parse_confidence,
-                "parse_valid": state.parse_valid,
-                "validation_reason": state.validation_reason,
-                "used_filters": state.used_filters,
-            },
-        }
-        yield f"event: evidence\ndata: {json.dumps(evidence)}\n\n"
-        yield f"event: done\ndata: {{}}\n\n"
+            evidence = {
+                "answer_validated": text_validated,
+                "quote_validations": [
+                    {"quote": v.quote, "valid": v.valid} for v in validations
+                ],
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": cost_usd,
+                "degraded": stream_failed,
+                "lounges": [
+                    {
+                        **{k: v for k, v in asdict(lg).items() if k != "chunks"},
+                        "chunks": [asdict(c) for c in lg.chunks],
+                    }
+                    for lg in retrieval.lounges
+                ],
+                "chunks": [asdict(c) for c in retrieval.chunks],
+                "candidates_pulled": retrieval.candidates_pulled,
+                "agent": {
+                    "area": state.area,
+                    "price_tier": state.price_tier,
+                    "aspect_positive": state.aspect_positive,
+                    "cleaned_query": state.cleaned_query,
+                    "parse_confidence": state.parse_confidence,
+                    "parse_valid": state.parse_valid,
+                    "validation_reason": state.validation_reason,
+                    "used_filters": state.used_filters,
+                },
+            }
+            yield f"event: evidence\ndata: {json.dumps(evidence)}\n\n"
+            yield f"event: done\ndata: {{}}\n\n"
 
     return StreamingResponse(
         event_stream(),
