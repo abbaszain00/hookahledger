@@ -182,9 +182,19 @@ class RetrievalPipeline:
         area: str | None,
         price_tier: str | None,
         aspect_positive: str | None,
+        lounge_id_focus: str | None = None,
     ) -> dict | None:
-        """Compose Chroma's $and filter. Returns None if no constraints set."""
+        """Compose Chroma's $and filter. Returns None if no constraints set.
+
+        When lounge_id_focus is set, it scopes retrieval to a single lounge.
+        Other filters (area, price_tier) are still applied but become
+        redundant - the lounge_id implies them. Aspect filtering still
+        applies via where_document in _query_chroma even when lounge is
+        focused.
+        """
         clauses: list[dict] = []
+        if lounge_id_focus:
+            clauses.append({"lounge_id": {"$eq": lounge_id_focus}})
         if area:
             clauses.append({"area": {"$eq": area}})
         if price_tier:
@@ -474,6 +484,7 @@ class RetrievalPipeline:
         area: str | None = None,
         price_tier: str | None = None,
         aspect_positive: str | None = None,
+        lounge_id_focus: str | None = None,
         top_k: int = DEFAULT_TOP_K,
         candidates: int = DEFAULT_CANDIDATES,
         per_lounge: int = DEFAULT_PER_LOUNGE,
@@ -495,15 +506,20 @@ class RetrievalPipeline:
             show_progress_bar=False,
         )[0].tolist()
 
-        # Step 4: build metadata filter
-        where = self._build_where(area, price_tier, aspect_positive)
+        # Step 4: build metadata filter (now includes optional lounge focus)
+        where = self._build_where(area, price_tier, aspect_positive, lounge_id_focus)
 
         # Step 5: pull candidates and aggregate
         raw = self._query_chroma(query_vec, where, candidates, aspect_positive)
         if not raw["ids"] or not raw["ids"][0]:
             return RetrievalResult(
                 query=query,
-                filters={"area": area, "price_tier": price_tier, "aspect_positive": aspect_positive},
+                filters={
+                    "area": area,
+                    "price_tier": price_tier,
+                    "aspect_positive": aspect_positive,
+                    "lounge_id_focus": lounge_id_focus,
+                },
                 candidates_pulled=0,
                 chunks=[],
                 lounges=[],
@@ -559,7 +575,12 @@ class RetrievalPipeline:
 
         return RetrievalResult(
             query=query,
-            filters={"area": area, "price_tier": price_tier, "aspect_positive": aspect_positive},
+            filters={
+                "area": area,
+                "price_tier": price_tier,
+                "aspect_positive": aspect_positive,
+                "lounge_id_focus": lounge_id_focus,
+            },
             candidates_pulled=candidates_pulled,
             chunks=top_chunks,
             lounges=lounges,

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 
 const API_BASE = "http://localhost:8000";
@@ -30,44 +30,83 @@ const ASPECTS = [
   { value: "wait_time", label: "Wait time" },
 ];
 
-// Human labels for aspect codes when surfaced in the inferred-filters pill row.
 const ASPECT_LABELS = Object.fromEntries(
   ASPECTS.filter((a) => a.value).map((a) => [a.value, a.label]),
 );
 
-// Human labels for price-tier codes.
 const PRICE_LABELS = Object.fromEntries(
   PRICE_TIERS.filter((p) => p.value).map((p) => [p.value, p.label]),
 );
 
-// Vignette layered on the page background. Subtle radial falloff so the page
-// reads as a low-lit space rather than a flat dark surface. Done as a CSS
-// background image rather than an extra element so it covers the entire
-// document height including the area below the content column.
+// Human labels for lounge IDs. Keep in sync with data/lounges.csv.
+// Used by InferredFilters to render lounge_focus as a name rather than the
+// underlying ID. Missing keys fall back to the raw lounge_id.
+const LOUNGE_LABELS = {
+  noya_harringay: "Noya Shisha Lounge & Restaurant",
+  shisha_garden_edgware: "The Shisha Garden",
+  the_banc_seven_sisters: "The Banc",
+  tigerbay_kingsbury: "TigerBay Shisha Lounge",
+  shishawi_edgware: "Shishawi",
+  aldar_edgware: "Al-Dar I",
+  mamounia_edgware: "Mamounia Lounge",
+  basrah_edgware: "Basrah Lounge",
+  laika_soho: "Laika Soho",
+  globe_lounge_forest_gate: "Globe Lounge",
+  cafe_cairo_brixton: "Cafe Cairo",
+  ground5_brixton: "Ground5 Shisha Lounge",
+};
+
 const PAGE_VIGNETTE = {
   backgroundImage:
     "radial-gradient(ellipse 80% 60% at 50% 0%, rgba(232, 160, 76, 0.04) 0%, transparent 60%), radial-gradient(ellipse 100% 80% at 50% 100%, rgba(0, 0, 0, 0.4) 0%, transparent 70%)",
 };
 
+function newSessionId() {
+  // crypto.randomUUID is in all modern browsers; fallback if absent.
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function newTurn(query, mode) {
+  return {
+    id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    query,
+    mode,
+    parsed: null,
+    statusMessage: null,
+    streamingText: "",
+    result: null,
+    error: null,
+    streaming: true,
+  };
+}
+
 export default function App() {
-  const [mode, setMode] = useState("filtered"); // "filtered" | "agent"
+  const [mode, setMode] = useState("filtered");
 
   const [query, setQuery] = useState("");
   const [area, setArea] = useState("");
   const [priceTier, setPriceTier] = useState("");
   const [aspectPositive, setAspectPositive] = useState("");
 
-  const [streaming, setStreaming] = useState(false);
-  const [streamingText, setStreamingText] = useState("");
-  const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
+  // The conversation: list of turns. Most recent turn is last.
+  const [turns, setTurns] = useState([]);
 
-  // Agent-only state
-  const [statusMessage, setStatusMessage] = useState(null); // current phase blurb
-  const [parsed, setParsed] = useState(null); // parsed event payload
+  // Session ID survives across turns; rotates on "New conversation" or mode switch.
+  const [sessionId, setSessionId] = useState(newSessionId);
 
-  // Hold the EventSource so we can close it on unmount or on a new query
+  // Ephemeral notice shown when the conversation auto-resets.
+  const [resetNotice, setResetNotice] = useState(null);
+
+  // Refs
   const eventSourceRef = useRef(null);
+  const inputRef = useRef(null);
+  const scrollAnchorRef = useRef(null);
+
+  // Whether anything is currently streaming. Derived from turns.
+  const streaming = turns.length > 0 && turns[turns.length - 1].streaming;
 
   useEffect(() => {
     return () => {
@@ -77,6 +116,67 @@ export default function App() {
     };
   }, []);
 
+  // Scroll to bottom whenever a new turn arrives or tokens stream in.
+  useEffect(() => {
+    if (scrollAnchorRef.current) {
+      scrollAnchorRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
+    }
+  }, [turns]);
+
+  // Update the most recent turn (the in-progress one) with a partial update.
+  // Wrapped in useCallback because the SSE handlers close over it.
+  const updateLastTurn = useCallback((updater) => {
+    setTurns((prev) => {
+      if (prev.length === 0) return prev;
+      const next = prev.slice();
+      const last = next[next.length - 1];
+      next[next.length - 1] =
+        typeof updater === "function" ? updater(last) : { ...last, ...updater };
+      return next;
+    });
+  }, []);
+
+  function resetConversation(reason) {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    // Tell the backend to drop the session; fire-and-forget.
+    if (sessionId) {
+      fetch(`${API_BASE}/api/session/reset?session_id=${sessionId}`, {
+        method: "POST",
+      }).catch(() => {});
+    }
+    setSessionId(newSessionId());
+    setTurns([]);
+    setQuery("");
+    if (reason) {
+      setResetNotice(reason);
+      setTimeout(() => setResetNotice(null), 3000);
+    }
+    if (inputRef.current) inputRef.current.focus();
+  }
+
+  function handleModeChange(next) {
+    if (streaming) return;
+    if (next === mode) return;
+    setMode(next);
+    // Switching modes mid-conversation breaks the conversational arc.
+    // Reset so the chat log doesn't mix retrieval semantics.
+    if (turns.length > 0) {
+      resetConversation(`Switched to ${next} mode. Starting new conversation.`);
+    }
+  }
+
+  function handleNewConversation() {
+    if (streaming) return;
+    if (turns.length === 0) return;
+    resetConversation(null);
+  }
+
   function handleSubmit() {
     if (!query.trim() || streaming) return;
 
@@ -85,19 +185,22 @@ export default function App() {
       eventSourceRef.current = null;
     }
 
-    setStreaming(true);
-    setStreamingText("");
-    setError(null);
-    setResult(null);
-    setStatusMessage(null);
-    setParsed(null);
+    const submittedQuery = query.trim();
+    const submittedMode = mode;
 
+    // Append the new turn first (in-progress).
+    setTurns((prev) => [...prev, newTurn(submittedQuery, submittedMode)]);
+
+    // Clear the input so the user can type the next question.
+    setQuery("");
+
+    // Build URL.
+    const params = new URLSearchParams({ query: submittedQuery });
+    if (sessionId) params.set("session_id", sessionId);
     let url;
-    if (mode === "agent") {
-      const params = new URLSearchParams({ query: query.trim() });
+    if (submittedMode === "agent") {
       url = `${API_BASE}/api/agent/stream?${params.toString()}`;
     } else {
-      const params = new URLSearchParams({ query: query.trim() });
       if (area) params.set("area", area);
       if (priceTier) params.set("price_tier", priceTier);
       if (aspectPositive) params.set("aspect_positive", aspectPositive);
@@ -110,7 +213,7 @@ export default function App() {
     es.addEventListener("status", (e) => {
       try {
         const data = JSON.parse(e.data);
-        setStatusMessage(data.message);
+        updateLastTurn({ statusMessage: data.message });
       } catch (err) {
         console.error("Failed to parse status:", err, e.data);
       }
@@ -119,7 +222,7 @@ export default function App() {
     es.addEventListener("parsed", (e) => {
       try {
         const data = JSON.parse(e.data);
-        setParsed(data);
+        updateLastTurn({ parsed: data });
       } catch (err) {
         console.error("Failed to parse parsed event:", err, e.data);
       }
@@ -128,8 +231,11 @@ export default function App() {
     es.addEventListener("token", (e) => {
       try {
         const chunk = JSON.parse(e.data);
-        setStreamingText((prev) => prev + chunk);
-        setStatusMessage(null);
+        updateLastTurn((t) => ({
+          ...t,
+          streamingText: t.streamingText + chunk,
+          statusMessage: null, // tokens flowing means generation started
+        }));
       } catch (err) {
         console.error("Failed to parse token:", err, e.data);
       }
@@ -138,41 +244,48 @@ export default function App() {
     es.addEventListener("evidence", (e) => {
       try {
         const evidence = JSON.parse(e.data);
-        setResult(evidence);
-        if (evidence.agent) {
-          setParsed((prev) => ({ ...(prev || {}), ...evidence.agent }));
-        }
+        updateLastTurn((t) => ({
+          ...t,
+          result: evidence,
+          parsed: evidence.agent
+            ? { ...(t.parsed || {}), ...evidence.agent }
+            : t.parsed,
+        }));
       } catch (err) {
         console.error("Failed to parse evidence:", err);
-        setError("Failed to parse evidence event");
+        updateLastTurn({ error: "Failed to parse evidence event" });
       }
     });
 
     es.addEventListener("done", () => {
       es.close();
       eventSourceRef.current = null;
-      setStreaming(false);
-      setStatusMessage(null);
+      updateLastTurn({ streaming: false, statusMessage: null });
+      if (inputRef.current) inputRef.current.focus();
     });
 
     es.addEventListener("error", (e) => {
       const data = e.data;
+      let message = null;
       if (data) {
         try {
           const parsed = JSON.parse(data);
-          setError(parsed.error || "Server error during streaming");
+          message = parsed.error || "Server error during streaming";
         } catch {
-          setError("Server error during streaming");
+          message = "Server error during streaming";
         }
       } else {
         if (eventSourceRef.current === es) {
-          setError("Connection lost during streaming");
+          message = "Connection lost during streaming";
         }
       }
       es.close();
       eventSourceRef.current = null;
-      setStreaming(false);
-      setStatusMessage(null);
+      updateLastTurn({
+        error: message,
+        streaming: false,
+        statusMessage: null,
+      });
     });
   }
 
@@ -183,36 +296,37 @@ export default function App() {
     }
   }
 
-  function handleModeChange(next) {
-    if (streaming) return;
-    setMode(next);
-    setResult(null);
-    setStreamingText("");
-    setError(null);
-    setStatusMessage(null);
-    setParsed(null);
-  }
-
-  const displayedText = result?.answer_validated ?? streamingText;
-  const showAnswerCard =
-    streaming || streamingText || result || statusMessage || parsed;
-
   const placeholder =
     mode === "agent"
-      ? "e.g. somewhere with great atmosphere in north london under £25"
-      : "e.g. best service in north london";
+      ? turns.length === 0
+        ? "e.g. somewhere with great atmosphere in north london under £25"
+        : "ask a follow-up..."
+      : turns.length === 0
+        ? "e.g. best service in north london"
+        : "ask a follow-up...";
 
   return (
-    <div className="min-h-screen" style={PAGE_VIGNETTE}>
-      <div className="max-w-6xl mx-auto px-8 py-12">
-        <header className="mb-12">
-          <h1 className="font-display text-6xl font-semibold text-cream-100 leading-none">
-            HookahLedger
-          </h1>
-          <p className="mt-3 text-cream-300 text-lg italic">
-            London shisha lounge intelligence engine.
-          </p>
-          <div className="mt-6 h-px w-16 bg-saffron-400/60" />
+    <div className="min-h-screen flex flex-col" style={PAGE_VIGNETTE}>
+      <div className="flex-1 max-w-6xl w-full mx-auto px-8 py-12 pb-44">
+        <header className="mb-12 flex items-end justify-between flex-wrap gap-4">
+          <div>
+            <h1 className="font-display text-6xl font-semibold text-cream-100 leading-none">
+              HookahLedger
+            </h1>
+            <p className="mt-3 text-cream-300 text-lg italic">
+              London shisha lounge intelligence engine.
+            </p>
+            <div className="mt-6 h-px w-16 bg-saffron-400/60" />
+          </div>
+          {turns.length > 0 && (
+            <button
+              onClick={handleNewConversation}
+              disabled={streaming}
+              className="text-[10px] uppercase tracking-[0.2em] text-cream-300 hover:text-saffron-400 disabled:opacity-50 disabled:cursor-not-allowed transition pb-1 border-b border-transparent hover:border-saffron-400/40"
+            >
+              New conversation
+            </button>
+          )}
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-10">
@@ -240,10 +354,15 @@ export default function App() {
                 options={ASPECTS}
                 disabled={streaming}
               />
+              {turns.length > 0 && (
+                <div className="text-[10px] text-cream-500 italic leading-relaxed pt-2">
+                  Filter changes apply to your next question, not previous ones.
+                </div>
+              )}
             </aside>
           )}
 
-          {/* Main column - spans full width when sidebar is hidden */}
+          {/* Main column */}
           <main className={mode === "agent" ? "md:col-span-2" : ""}>
             <ModeToggle
               mode={mode}
@@ -251,123 +370,193 @@ export default function App() {
               disabled={streaming}
             />
 
-            <div className="flex gap-2 mb-8">
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={placeholder}
-                className="flex-1 px-4 py-3 bg-base-800 border border-base-600 rounded text-cream-100 placeholder:text-cream-500 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
-                disabled={streaming}
-              />
-              <button
-                onClick={handleSubmit}
-                disabled={streaming || !query.trim()}
-                className="px-6 py-3 bg-saffron-400 text-base-900 font-medium rounded hover:bg-saffron-400/90 disabled:bg-base-700 disabled:text-cream-500 disabled:cursor-not-allowed transition"
-              >
-                {streaming ? "Thinking…" : "Ask"}
-              </button>
-            </div>
-
-            {error && (
-              <div className="p-4 mb-4 bg-base-800 border border-terracotta-500/40 rounded text-terracotta-500 text-sm">
-                <span className="font-semibold">Error:</span> {error}
+            {resetNotice && (
+              <div className="mb-6 text-xs text-saffron-400 italic">
+                {resetNotice}
               </div>
             )}
 
-            {showAnswerCard && (
-              <div className="space-y-8">
-                {/* Inferred filters - agent mode only, hidden on decline */}
-                {mode === "agent" && parsed && !result?.is_declined && (
-                  <InferredFilters parsed={parsed} />
-                )}
+            {turns.length === 0 ? (
+              <EmptyState mode={mode} />
+            ) : (
+              <div className="space-y-12">
+                {turns.map((turn, idx) => (
+                  <TurnView key={turn.id} turn={turn} index={idx} />
+                ))}
+              </div>
+            )}
 
-                {/* Answer */}
-                <div
-                  className={`relative p-7 bg-base-800 rounded ${
-                    result?.is_declined
-                      ? "border border-base-600"
-                      : "border-l-2 border-l-saffron-400 border-y border-r border-y-base-600 border-r-base-600"
+            <div ref={scrollAnchorRef} />
+          </main>
+        </div>
+      </div>
+
+      {/* Sticky chat input */}
+      <div
+        className="sticky bottom-0 left-0 right-0 border-t border-base-600 backdrop-blur"
+        style={{ backgroundColor: "rgba(14, 9, 8, 0.92)" }}
+      >
+        <div className="max-w-6xl mx-auto px-8 py-5">
+          <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-10">
+            {mode === "filtered" && <div className="hidden md:block" />}
+            <div className={mode === "agent" ? "md:col-span-2" : ""}>
+              <div className="relative">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={placeholder}
+                  className="w-full pl-4 pr-24 py-3 bg-base-800 border border-base-600 rounded text-cream-100 placeholder:text-cream-500 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
+                  disabled={streaming}
+                  autoFocus
+                />
+                <button
+                  onClick={handleSubmit}
+                  disabled={streaming || !query.trim()}
+                  className={`absolute right-1.5 top-1/2 -translate-y-1/2 px-4 py-1.5 text-sm font-medium rounded-sm transition ${
+                    streaming || !query.trim()
+                      ? "text-cream-500 cursor-not-allowed"
+                      : "bg-saffron-400 text-base-900 hover:bg-saffron-400/90"
                   }`}
                 >
-                  <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-4 flex items-center gap-2">
-                    {result?.is_declined ? "Outside system scope" : "Answer"}
-                    {streaming && !result?.is_declined && (
-                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-saffron-400 animate-pulse shadow-[0_0_8px_rgba(232,160,76,0.6)]" />
-                    )}
-                  </h2>
-                  {statusMessage && !result?.is_declined && (
-                    <div className="text-xs text-cream-300 italic mb-4 -mt-2">
-                      {statusMessage}
-                    </div>
-                  )}
-                  <div className="prose prose-invert prose-sm max-w-none prose-headings:font-display prose-headings:text-cream-100 prose-headings:font-semibold prose-strong:text-cream-100 prose-p:text-cream-100 prose-p:leading-relaxed prose-li:text-cream-100 prose-em:text-cream-300">
-                    {displayedText ? (
-                      <ReactMarkdown>{displayedText}</ReactMarkdown>
-                    ) : (
-                      <span className="text-cream-300 italic">
-                        {statusMessage || "Searching reviews…"}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Evidence cards (only after stream completes) */}
-                {result?.lounges?.length > 0 && (
-                  <div>
-                    <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-4">
-                      Evidence ({result.lounges.length}{" "}
-                      {result.lounges.length === 1 ? "lounge" : "lounges"})
-                    </h2>
-                    <div className="space-y-4">
-                      {result.lounges.map((lounge) => (
-                        <LoungeCard key={lounge.lounge_id} lounge={lounge} />
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Metadata - suppressed on decline (zeros would be misleading) */}
-                {result && !result.is_declined && (
-                  <div className="text-xs text-cream-500 pt-5 border-t border-base-600 space-y-3">
-                    <div className="flex flex-wrap gap-2">
-                      {result.degraded && (
-                        <div className="inline-block px-2.5 py-1 bg-base-800 border border-saffron-400/40 rounded text-saffron-400">
-                          Partial response — stream interrupted before
-                          completion.
-                        </div>
-                      )}
-                      {result.rerank_succeeded === false && (
-                        <div className="inline-block px-2.5 py-1 bg-base-800 border border-saffron-400/40 rounded text-saffron-400">
-                          Rerank unavailable — results ordered by similarity and
-                          recency only.
-                        </div>
-                      )}
-                    </div>
-                    <div className="font-mono tabular">
-                      {result.candidates_pulled} candidates pulled ·{" "}
-                      {result.chunks?.length || 0} chunks · {result.tokens_in}{" "}
-                      in / {result.tokens_out} out · $
-                      {result.cost_usd?.toFixed(4)} ·{" "}
-                      {result.quote_validations?.filter((v) => v.valid)
-                        .length || 0}
-                      /{result.quote_validations?.length || 0} quotes verified
-                    </div>
-                  </div>
-                )}
+                  {streaming ? "Thinking…" : "Ask"}
+                </button>
               </div>
-            )}
-          </main>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
+function EmptyState({ mode }) {
+  return (
+    <div className="text-cream-300 text-sm italic leading-relaxed max-w-md">
+      {mode === "agent"
+        ? "Ask anything about London shisha lounges. The agent will infer filters from your question and refine across follow-ups."
+        : "Choose your filters in the sidebar and ask a question, or just describe what you're looking for."}
+    </div>
+  );
+}
+
+function TurnView({ turn, index }) {
+  const {
+    query,
+    mode,
+    parsed,
+    statusMessage,
+    streamingText,
+    result,
+    error,
+    streaming,
+  } = turn;
+  const displayedText = result?.answer_validated ?? streamingText;
+  const isDeclined = result?.is_declined === true;
+
+  return (
+    <div className="space-y-5">
+      {/* The user's question, shown as a quiet prefix */}
+      <div className="flex items-baseline gap-3">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-500 shrink-0 mt-1">
+          You · {index + 1}
+        </span>
+        <p className="text-cream-100 text-base leading-relaxed">{query}</p>
+      </div>
+
+      {/* Inferred filters - agent mode only, hidden on decline */}
+      {mode === "agent" && parsed && !isDeclined && (
+        <InferredFilters parsed={parsed} />
+      )}
+
+      {/* Answer card */}
+      {(streamingText || result || statusMessage || error) && (
+        <div
+          className={`relative p-7 bg-base-800 rounded ${
+            isDeclined
+              ? "border border-base-600"
+              : "border-l-2 border-l-saffron-400 border-y border-r border-y-base-600 border-r-base-600"
+          }`}
+        >
+          <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-4 flex items-center gap-2">
+            {isDeclined ? "Outside system scope" : "Answer"}
+            {streaming && !isDeclined && (
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-saffron-400 animate-pulse shadow-[0_0_8px_rgba(232,160,76,0.6)]" />
+            )}
+          </h2>
+          {statusMessage && !isDeclined && (
+            <div className="text-xs text-cream-300 italic mb-4 -mt-2">
+              {statusMessage}
+            </div>
+          )}
+          <div className="prose prose-invert prose-sm max-w-none prose-headings:font-display prose-headings:text-cream-100 prose-headings:font-semibold prose-strong:text-cream-100 prose-p:text-cream-100 prose-p:leading-relaxed prose-li:text-cream-100 prose-em:text-cream-300">
+            {displayedText ? (
+              <ReactMarkdown>{displayedText}</ReactMarkdown>
+            ) : (
+              <span className="text-cream-300 italic">
+                {statusMessage || "Searching reviews…"}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="p-4 bg-base-800 border border-terracotta-500/40 rounded text-terracotta-500 text-sm">
+          <span className="font-semibold">Error:</span> {error}
+        </div>
+      )}
+
+      {/* Evidence cards */}
+      {result?.lounges?.length > 0 && (
+        <div>
+          <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-4">
+            Evidence ({result.lounges.length}{" "}
+            {result.lounges.length === 1 ? "lounge" : "lounges"})
+          </h2>
+          <div className="space-y-4">
+            {result.lounges.map((lounge) => (
+              <LoungeCard key={lounge.lounge_id} lounge={lounge} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Metadata footer - suppressed on decline */}
+      {result && !isDeclined && (
+        <div className="text-xs text-cream-500 pt-4 border-t border-base-600 space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {result.degraded && (
+              <div className="inline-block px-2.5 py-1 bg-base-800 border border-saffron-400/40 rounded text-saffron-400">
+                Partial response — stream interrupted before completion.
+              </div>
+            )}
+            {result.rerank_succeeded === false && (
+              <div className="inline-block px-2.5 py-1 bg-base-800 border border-saffron-400/40 rounded text-saffron-400">
+                Rerank unavailable — results ordered by similarity and recency
+                only.
+              </div>
+            )}
+          </div>
+          <div className="font-mono tabular">
+            {result.candidates_pulled} candidates pulled ·{" "}
+            {result.chunks?.length || 0} chunks · {result.tokens_in} in /{" "}
+            {result.tokens_out} out · ${result.cost_usd?.toFixed(4)} ·{" "}
+            {result.quote_validations?.filter((v) => v.valid).length || 0}/
+            {result.quote_validations?.length || 0} quotes verified
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ModeToggle({ mode, onChange, disabled }) {
   return (
-    <div className="mb-5 inline-flex p-0.5 bg-base-800 border border-base-600 rounded">
+    <div className="mb-6 inline-flex p-0.5 bg-base-800 border border-base-600 rounded">
       <button
         onClick={() => onChange("filtered")}
         disabled={disabled}
@@ -395,21 +584,36 @@ function ModeToggle({ mode, onChange, disabled }) {
 }
 
 function InferredFilters({ parsed }) {
+  // Build pill list. lounge_focus comes first when set - it's the most
+  // consequential filter (scopes to one venue).
   const pills = [];
+
+  if (parsed.lounge_focus) {
+    pills.push({
+      key: "lounge_focus",
+      label: "Focused on",
+      value: LOUNGE_LABELS[parsed.lounge_focus] || parsed.lounge_focus,
+      isLounge: true,
+    });
+  }
   if (parsed.area)
     pills.push({ key: "area", label: "Area", value: parsed.area });
   if (parsed.price_tier)
     pills.push({
-      key: "price",
+      key: "price_tier",
       label: "Price",
       value: PRICE_LABELS[parsed.price_tier] || parsed.price_tier,
     });
   if (parsed.aspect_positive)
     pills.push({
-      key: "aspect",
+      key: "aspect_positive",
       label: "Aspect",
       value: ASPECT_LABELS[parsed.aspect_positive] || parsed.aspect_positive,
     });
+
+  // Set of filter keys that were carried forward from a prior turn.
+  // Backend ships this as a sorted array; we use a Set for O(1) lookup.
+  const inherited = new Set(parsed.inherited_filters || []);
 
   const parseFailed = parsed.parse_valid === false;
   const noFilters = pills.length === 0 && !parseFailed;
@@ -432,16 +636,33 @@ function InferredFilters({ parsed }) {
           No filters inferred. Searching all lounges.
         </div>
       ) : (
-        <div className="flex flex-wrap gap-2">
-          {pills.map((p) => (
-            <span
-              key={p.key}
-              className="inline-flex items-center gap-1.5 px-3 py-1 bg-base-700 border border-base-600 rounded-sm text-xs"
-            >
-              <span className="text-cream-300">{p.label}:</span>
-              <span className="font-medium text-cream-100">{p.value}</span>
-            </span>
-          ))}
+        <div className="flex flex-wrap gap-2 items-center">
+          {pills.map((p) => {
+            const isInherited = inherited.has(p.key);
+            const isFocus = p.isLounge;
+            // Visual treatment:
+            // - Focus pill gets a thin saffron border to mark it as dominant.
+            // - Inherited pills are slightly dimmed and labelled.
+            // - Fresh pills are the standard cream-on-base treatment.
+            const baseClasses =
+              "inline-flex items-center gap-1.5 px-3 py-1 bg-base-700 border rounded-sm text-xs transition";
+            const variantClasses = isFocus
+              ? "border-saffron-400/60"
+              : isInherited
+                ? "border-base-600 opacity-70"
+                : "border-base-600";
+            return (
+              <span key={p.key} className={`${baseClasses} ${variantClasses}`}>
+                <span className="text-cream-300">{p.label}:</span>
+                <span className="font-medium text-cream-100">{p.value}</span>
+                {isInherited && (
+                  <span className="text-cream-500 italic ml-1">
+                    · carried forward
+                  </span>
+                )}
+              </span>
+            );
+          })}
           {parsed.cleaned_query &&
             parsed.cleaned_query !== parsed.raw_query && (
               <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-base-700 border border-base-600 rounded-sm text-xs">
