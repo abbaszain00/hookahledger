@@ -561,60 +561,66 @@ function LoungeCard({ lounge }) {
     .slice(0, 5);
 
   const topChunk = lounge.chunks?.[0];
-  const reviewExcerpt = topChunk
-    ? topChunk.review_text.length > 280
-      ? topChunk.review_text.slice(0, 280) + "…"
-      : topChunk.review_text
-    : null;
+  const reviewExcerpt = topChunk ? extractReview(topChunk.document) : null;
 
   return (
-    <div className="p-5 bg-base-800 border border-base-600 rounded">
-      <div className="flex items-baseline justify-between gap-4 mb-3 flex-wrap">
-        <h3 className="font-display text-xl font-semibold text-cream-100">
-          {lounge.name || lounge.lounge_id}
+    <div className="p-6 bg-base-800 border border-base-600 rounded">
+      <div className="flex items-baseline justify-between mb-4 flex-wrap gap-2">
+        <h3 className="font-display text-2xl font-semibold text-cream-100 leading-none">
+          {lounge.lounge_name}
         </h3>
-        <div className="text-[10px] uppercase tracking-[0.2em] text-cream-500 font-mono tabular">
-          {lounge.area}
-          {lounge.price_tier ? ` · ${lounge.price_tier}` : ""}
+        <div className="text-xs text-cream-300 font-mono tabular">
+          {lounge.area} · {lounge.total_reviews} reviews · recency{" "}
+          {lounge.mean_recency_weight?.toFixed(2) ?? "?"}
         </div>
       </div>
 
       {topAspects.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-3">
-          {topAspects.map((a) => {
-            const sentimentClass =
-              a.sentiment === "positive"
-                ? "text-sage-400"
-                : a.sentiment === "negative"
-                  ? "text-terracotta-500"
-                  : "text-cream-300";
-            return (
-              <span
-                key={`${a.aspect}-${a.sentiment}`}
-                className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-base-700 border border-base-600 rounded-sm text-[11px]"
-              >
-                <span className="text-cream-300">
-                  {ASPECT_LABELS[a.aspect] || a.aspect}
-                </span>
-                <span className={`font-mono tabular ${sentimentClass}`}>
-                  {a.sentiment === "positive"
-                    ? "+"
-                    : a.sentiment === "negative"
-                      ? "−"
-                      : "~"}
-                  {a.n_reviews}
-                </span>
-              </span>
-            );
-          })}
+        <div className="space-y-1.5 mb-4">
+          {topAspects.map((a) => (
+            <AspectRow key={`${a.aspect}-${a.sentiment}`} aspect={a} />
+          ))}
         </div>
       )}
 
       {reviewExcerpt && (
-        <p className="text-sm text-cream-300 italic leading-relaxed border-l border-base-600 pl-3">
+        <div className="text-sm text-cream-100/90 italic border-l border-saffron-400/40 pl-4 mt-4 leading-relaxed">
           "{reviewExcerpt}"
-        </p>
+          {topChunk?.review_date && (
+            <span className="block not-italic text-xs text-cream-500 mt-2 font-mono tabular">
+              — {topChunk.review_date}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
+}
+
+function AspectRow({ aspect }) {
+  const colour =
+    aspect.sentiment === "positive"
+      ? "text-sage-500"
+      : aspect.sentiment === "negative"
+        ? "text-terracotta-500"
+        : "text-saffron-400";
+
+  const label = aspect.aspect.replace(/_/g, " ");
+
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-cream-100">{label}</span>
+      <span className={`font-mono tabular text-xs ${colour}`}>
+        {aspect.sentiment} · {aspect.n_reviews}
+      </span>
+    </div>
+  );
+}
+
+function extractReview(document) {
+  if (!document) return null;
+  const idx = document.indexOf("Review: ");
+  if (idx === -1) return null;
+  const text = document.slice(idx + 8);
+  return text.length > 300 ? text.slice(0, 300) + "…" : text;
 }
