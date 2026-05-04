@@ -1,4 +1,3 @@
-
 """
 main.py - FastAPI backend for HookahLedger.
 
@@ -50,6 +49,7 @@ from agent.nodes import (  # noqa: E402
     validate_parse,
     retrieve_with_filters,
     retrieve_no_filter,
+    decline_query,
 )
 from agent.state import AgentState  # noqa: E402
 from answer import (  # noqa: E402
@@ -365,6 +365,12 @@ def agent_stream(query: str, top_k: int = 5):
       event: evidence   data: {... structured retrieval + validation + agent ...}
       event: done       data: {}
 
+    Off-taxonomy fast-decline path: when parse_query flags is_in_taxonomy=False,
+    skip retrieval and Sonnet entirely. Emit the hardcoded decline message as a
+    single token event (so the frontend renders it via the existing answer-card
+    path) and a stripped evidence event with is_declined=true so the frontend
+    can suppress lounge cards / metadata that don't apply.
+
     Implemented imperatively (not via LangGraph .invoke) because we need to
     interleave SSE events between each node's execution. Same node functions
     as the graph; only the orchestration differs.
@@ -402,6 +408,44 @@ def agent_stream(query: str, top_k: int = 5):
             })
             + "\n\n"
         )
+
+        # Phase 2b: fast-decline if the parser flagged the query as off-taxonomy.
+        # Skip retrieval and Sonnet entirely.
+        if state.is_in_taxonomy is False:
+            decline_update = decline_query(state)
+            for k, v in decline_update.items():
+                setattr(state, k, v)
+
+            decline_text = state.answer_result.text
+            yield f"event: token\ndata: {json.dumps(decline_text)}\n\n"
+
+            evidence = {
+                "answer_validated": decline_text,
+                "quote_validations": [],
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cost_usd": 0.0,
+                "degraded": False,
+                "rerank_succeeded": True,
+                "is_declined": True,
+                "decline_reason": state.decline_reason,
+                "lounges": [],
+                "chunks": [],
+                "candidates_pulled": 0,
+                "agent": {
+                    "area": state.area,
+                    "price_tier": state.price_tier,
+                    "aspect_positive": state.aspect_positive,
+                    "cleaned_query": state.cleaned_query,
+                    "parse_confidence": state.parse_confidence,
+                    "parse_valid": state.parse_valid,
+                    "validation_reason": state.validation_reason,
+                    "used_filters": False,
+                },
+            }
+            yield f"event: evidence\ndata: {json.dumps(evidence)}\n\n"
+            yield f"event: done\ndata: {{}}\n\n"
+            return
 
         # Phase 3: retrieval (filtered or fallback)
         if state.parse_valid:
@@ -496,6 +540,8 @@ def agent_stream(query: str, top_k: int = 5):
                 "cost_usd": cost_usd,
                 "degraded": stream_failed,
                 "rerank_succeeded": retrieval.rerank_succeeded,
+                "is_declined": False,
+                "decline_reason": None,
                 "lounges": [
                     {
                         **{k: v for k, v in asdict(lg).items() if k != "chunks"},

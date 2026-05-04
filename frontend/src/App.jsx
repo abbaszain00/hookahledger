@@ -281,19 +281,25 @@ export default function App() {
 
             {showAnswerCard && (
               <div className="space-y-6">
-                {/* Inferred filters - agent mode only */}
-                {mode === "agent" && parsed && (
+                {/* Inferred filters - agent mode only, hidden on decline */}
+                {mode === "agent" && parsed && !result?.is_declined && (
                   <InferredFilters parsed={parsed} />
                 )}
 
                 {/* Answer */}
-                <div className="p-6 bg-white border border-stone-200 rounded">
+                <div
+                  className={`p-6 bg-white border rounded ${
+                    result?.is_declined
+                      ? "border-stone-300"
+                      : "border-stone-200"
+                  }`}
+                >
                   <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3 flex items-center gap-2">
-                    Answer
-                    {streaming && (
+                    {result?.is_declined ? "Outside system scope" : "Answer"}
+                    {streaming && !result?.is_declined && (
                       <span className="inline-block w-2 h-2 rounded-full bg-stone-400 animate-pulse" />
                     )}
-                    {statusMessage && (
+                    {statusMessage && !result?.is_declined && (
                       <span className="text-stone-400 normal-case font-normal tracking-normal italic ml-2">
                         {statusMessage}
                       </span>
@@ -325,8 +331,8 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Metadata */}
-                {result && (
+                {/* Metadata - suppressed on decline (zeros would be misleading) */}
+                {result && !result.is_declined && (
                   <div className="text-xs text-stone-500 pt-4 border-t border-stone-200 space-y-2">
                     <div className="flex flex-wrap gap-2">
                       {result.degraded && (
