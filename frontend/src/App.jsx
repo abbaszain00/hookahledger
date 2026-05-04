@@ -3,40 +3,25 @@ import ReactMarkdown from "react-markdown";
 
 const API_BASE = "http://localhost:8000";
 
-const AREAS = [
-  { value: "", label: "Any area" },
-  { value: "North London", label: "North London" },
-  { value: "Central London", label: "Central London" },
-  { value: "East London", label: "East London" },
-  { value: "South London", label: "South London" },
-];
+// Human labels for parsed filter values. Used by InferredFilters to render
+// machine-readable values (price_tier="mid", aspect_positive="coal_management")
+// as something a human reads. Missing keys fall back to the raw value.
+const PRICE_LABELS = {
+  budget: "Budget (~£15)",
+  mid: "Mid (~£20-25)",
+  premium: "Premium (£30+)",
+};
 
-const PRICE_TIERS = [
-  { value: "", label: "Any price" },
-  { value: "budget", label: "Budget (~£15)" },
-  { value: "mid", label: "Mid (~£20-25)" },
-  { value: "premium", label: "Premium (£30+)" },
-];
-
-const ASPECTS = [
-  { value: "", label: "No aspect filter" },
-  { value: "flavour_quality", label: "Flavour quality" },
-  { value: "coal_management", label: "Coal management" },
-  { value: "service_speed", label: "Service speed" },
-  { value: "value_for_money", label: "Value for money" },
-  { value: "atmosphere_vibe", label: "Atmosphere" },
-  { value: "seating_comfort", label: "Seating comfort" },
-  { value: "food_quality", label: "Food quality" },
-  { value: "wait_time", label: "Wait time" },
-];
-
-const ASPECT_LABELS = Object.fromEntries(
-  ASPECTS.filter((a) => a.value).map((a) => [a.value, a.label]),
-);
-
-const PRICE_LABELS = Object.fromEntries(
-  PRICE_TIERS.filter((p) => p.value).map((p) => [p.value, p.label]),
-);
+const ASPECT_LABELS = {
+  flavour_quality: "Flavour quality",
+  coal_management: "Coal management",
+  service_speed: "Service speed",
+  value_for_money: "Value for money",
+  atmosphere_vibe: "Atmosphere",
+  seating_comfort: "Seating comfort",
+  food_quality: "Food quality",
+  wait_time: "Wait time",
+};
 
 // Human labels for lounge IDs. Keep in sync with data/lounges.csv.
 // Used by InferredFilters to render lounge_focus as a name rather than the
@@ -69,11 +54,10 @@ function newSessionId() {
   return `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function newTurn(query, mode) {
+function newTurn(query) {
   return {
     id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     query,
-    mode,
     parsed: null,
     statusMessage: null,
     streamingText: "",
@@ -84,17 +68,12 @@ function newTurn(query, mode) {
 }
 
 export default function App() {
-  const [mode, setMode] = useState("filtered");
-
   const [query, setQuery] = useState("");
-  const [area, setArea] = useState("");
-  const [priceTier, setPriceTier] = useState("");
-  const [aspectPositive, setAspectPositive] = useState("");
 
   // The conversation: list of turns. Most recent turn is last.
   const [turns, setTurns] = useState([]);
 
-  // Session ID survives across turns; rotates on "New conversation" or mode switch.
+  // Session ID survives across turns; rotates on "New conversation".
   const [sessionId, setSessionId] = useState(newSessionId);
 
   // Ephemeral notice shown when the conversation auto-resets.
@@ -160,17 +139,6 @@ export default function App() {
     if (inputRef.current) inputRef.current.focus();
   }
 
-  function handleModeChange(next) {
-    if (streaming) return;
-    if (next === mode) return;
-    setMode(next);
-    // Switching modes mid-conversation breaks the conversational arc.
-    // Reset so the chat log doesn't mix retrieval semantics.
-    if (turns.length > 0) {
-      resetConversation(`Switched to ${next} mode. Starting new conversation.`);
-    }
-  }
-
   function handleNewConversation() {
     if (streaming) return;
     if (turns.length === 0) return;
@@ -186,26 +154,17 @@ export default function App() {
     }
 
     const submittedQuery = query.trim();
-    const submittedMode = mode;
 
     // Append the new turn first (in-progress).
-    setTurns((prev) => [...prev, newTurn(submittedQuery, submittedMode)]);
+    setTurns((prev) => [...prev, newTurn(submittedQuery)]);
 
     // Clear the input so the user can type the next question.
     setQuery("");
 
-    // Build URL.
+    // Build URL. Always agent path; bare endpoints are eval-only now.
     const params = new URLSearchParams({ query: submittedQuery });
     if (sessionId) params.set("session_id", sessionId);
-    let url;
-    if (submittedMode === "agent") {
-      url = `${API_BASE}/api/agent/stream?${params.toString()}`;
-    } else {
-      if (area) params.set("area", area);
-      if (priceTier) params.set("price_tier", priceTier);
-      if (aspectPositive) params.set("aspect_positive", aspectPositive);
-      url = `${API_BASE}/api/chat/stream?${params.toString()}`;
-    }
+    const url = `${API_BASE}/api/agent/stream?${params.toString()}`;
 
     const es = new EventSource(url);
     eventSourceRef.current = es;
@@ -297,17 +256,13 @@ export default function App() {
   }
 
   const placeholder =
-    mode === "agent"
-      ? turns.length === 0
-        ? "e.g. somewhere with great atmosphere in north london under £25"
-        : "ask a follow-up..."
-      : turns.length === 0
-        ? "e.g. best service in north london"
-        : "ask a follow-up...";
+    turns.length === 0
+      ? "e.g. somewhere with great atmosphere in north london under £25"
+      : "ask a follow-up...";
 
   return (
     <div className="min-h-screen flex flex-col" style={PAGE_VIGNETTE}>
-      <div className="flex-1 max-w-6xl w-full mx-auto px-8 py-12 pb-44">
+      <div className="flex-1 max-w-4xl w-full mx-auto px-8 py-12 pb-44">
         <header className="mb-12 flex items-end justify-between flex-wrap gap-4">
           <div>
             <h1 className="font-display text-6xl font-semibold text-cream-100 leading-none">
@@ -329,66 +284,25 @@ export default function App() {
           )}
         </header>
 
-        <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-10">
-          {/* Sidebar - hidden in agent mode */}
-          {mode === "filtered" && (
-            <aside className="space-y-5">
-              <FilterSelect
-                label="Area"
-                value={area}
-                onChange={setArea}
-                options={AREAS}
-                disabled={streaming}
-              />
-              <FilterSelect
-                label="Price tier"
-                value={priceTier}
-                onChange={setPriceTier}
-                options={PRICE_TIERS}
-                disabled={streaming}
-              />
-              <FilterSelect
-                label="Aspect"
-                value={aspectPositive}
-                onChange={setAspectPositive}
-                options={ASPECTS}
-                disabled={streaming}
-              />
-              {turns.length > 0 && (
-                <div className="text-[10px] text-cream-500 italic leading-relaxed pt-2">
-                  Filter changes apply to your next question, not previous ones.
-                </div>
-              )}
-            </aside>
+        <main>
+          {resetNotice && (
+            <div className="mb-6 text-xs text-saffron-400 italic">
+              {resetNotice}
+            </div>
           )}
 
-          {/* Main column */}
-          <main className={mode === "agent" ? "md:col-span-2" : ""}>
-            <ModeToggle
-              mode={mode}
-              onChange={handleModeChange}
-              disabled={streaming}
-            />
+          {turns.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="space-y-12">
+              {turns.map((turn, idx) => (
+                <TurnView key={turn.id} turn={turn} index={idx} />
+              ))}
+            </div>
+          )}
 
-            {resetNotice && (
-              <div className="mb-6 text-xs text-saffron-400 italic">
-                {resetNotice}
-              </div>
-            )}
-
-            {turns.length === 0 ? (
-              <EmptyState mode={mode} />
-            ) : (
-              <div className="space-y-12">
-                {turns.map((turn, idx) => (
-                  <TurnView key={turn.id} turn={turn} index={idx} />
-                ))}
-              </div>
-            )}
-
-            <div ref={scrollAnchorRef} />
-          </main>
-        </div>
+          <div ref={scrollAnchorRef} />
+        </main>
       </div>
 
       {/* Sticky chat input */}
@@ -396,35 +310,30 @@ export default function App() {
         className="sticky bottom-0 left-0 right-0 border-t border-base-600 backdrop-blur"
         style={{ backgroundColor: "rgba(14, 9, 8, 0.92)" }}
       >
-        <div className="max-w-6xl mx-auto px-8 py-5">
-          <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-10">
-            {mode === "filtered" && <div className="hidden md:block" />}
-            <div className={mode === "agent" ? "md:col-span-2" : ""}>
-              <div className="relative">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder={placeholder}
-                  className="w-full pl-4 pr-24 py-3 bg-base-800 border border-base-600 rounded text-cream-100 placeholder:text-cream-500 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
-                  disabled={streaming}
-                  autoFocus
-                />
-                <button
-                  onClick={handleSubmit}
-                  disabled={streaming || !query.trim()}
-                  className={`absolute right-1.5 top-1/2 -translate-y-1/2 px-4 py-1.5 text-sm font-medium rounded-sm transition ${
-                    streaming || !query.trim()
-                      ? "text-cream-500 cursor-not-allowed"
-                      : "bg-saffron-400 text-base-900 hover:bg-saffron-400/90"
-                  }`}
-                >
-                  {streaming ? "Thinking…" : "Ask"}
-                </button>
-              </div>
-            </div>
+        <div className="max-w-4xl mx-auto px-8 py-5">
+          <div className="relative">
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              className="w-full pl-4 pr-24 py-3 bg-base-800 border border-base-600 rounded text-cream-100 placeholder:text-cream-500 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
+              disabled={streaming}
+              autoFocus
+            />
+            <button
+              onClick={handleSubmit}
+              disabled={streaming || !query.trim()}
+              className={`absolute right-1.5 top-1/2 -translate-y-1/2 px-4 py-1.5 text-sm font-medium rounded-sm transition ${
+                streaming || !query.trim()
+                  ? "text-cream-500 cursor-not-allowed"
+                  : "bg-saffron-400 text-base-900 hover:bg-saffron-400/90"
+              }`}
+            >
+              {streaming ? "Thinking…" : "Ask"}
+            </button>
           </div>
         </div>
       </div>
@@ -432,12 +341,11 @@ export default function App() {
   );
 }
 
-function EmptyState({ mode }) {
+function EmptyState() {
   return (
     <div className="text-cream-300 text-sm italic leading-relaxed max-w-md">
-      {mode === "agent"
-        ? "Ask anything about London shisha lounges. The agent will infer filters from your question and refine across follow-ups."
-        : "Choose your filters in the sidebar and ask a question, or just describe what you're looking for."}
+      Ask anything about London shisha lounges. Filters are inferred from your
+      question, and you can refine across follow-ups.
     </div>
   );
 }
@@ -445,7 +353,6 @@ function EmptyState({ mode }) {
 function TurnView({ turn, index }) {
   const {
     query,
-    mode,
     parsed,
     statusMessage,
     streamingText,
@@ -466,10 +373,8 @@ function TurnView({ turn, index }) {
         <p className="text-cream-100 text-base leading-relaxed">{query}</p>
       </div>
 
-      {/* Inferred filters - agent mode only, hidden on decline */}
-      {mode === "agent" && parsed && !isDeclined && (
-        <InferredFilters parsed={parsed} />
-      )}
+      {/* Inferred filters - hidden on decline */}
+      {parsed && !isDeclined && <InferredFilters parsed={parsed} />}
 
       {/* Answer card */}
       {(streamingText || result || statusMessage || error) && (
@@ -550,35 +455,6 @@ function TurnView({ turn, index }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function ModeToggle({ mode, onChange, disabled }) {
-  return (
-    <div className="mb-6 inline-flex p-0.5 bg-base-800 border border-base-600 rounded">
-      <button
-        onClick={() => onChange("filtered")}
-        disabled={disabled}
-        className={`px-4 py-1.5 text-xs uppercase tracking-widest font-medium rounded-sm transition ${
-          mode === "filtered"
-            ? "bg-saffron-400 text-base-900"
-            : "text-cream-300 hover:text-cream-100"
-        } disabled:opacity-50 disabled:cursor-not-allowed`}
-      >
-        Filtered
-      </button>
-      <button
-        onClick={() => onChange("agent")}
-        disabled={disabled}
-        className={`px-4 py-1.5 text-xs uppercase tracking-widest font-medium rounded-sm transition ${
-          mode === "agent"
-            ? "bg-saffron-400 text-base-900"
-            : "text-cream-300 hover:text-cream-100"
-        } disabled:opacity-50 disabled:cursor-not-allowed`}
-      >
-        Agent
-      </button>
     </div>
   );
 }
@@ -678,28 +554,6 @@ function InferredFilters({ parsed }) {
   );
 }
 
-function FilterSelect({ label, value, onChange, options, disabled }) {
-  return (
-    <div>
-      <label className="block text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-2">
-        {label}
-      </label>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        className="w-full px-3 py-2 bg-base-800 border border-base-600 rounded text-sm text-cream-100 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value} className="bg-base-800">
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
 function LoungeCard({ lounge }) {
   const topAspects = (lounge.aspect_counts || [])
     .slice()
@@ -707,65 +561,60 @@ function LoungeCard({ lounge }) {
     .slice(0, 5);
 
   const topChunk = lounge.chunks?.[0];
-  const reviewExcerpt = topChunk ? extractReview(topChunk.document) : null;
+  const reviewExcerpt = topChunk
+    ? topChunk.review_text.length > 280
+      ? topChunk.review_text.slice(0, 280) + "…"
+      : topChunk.review_text
+    : null;
 
   return (
-    <div className="p-6 bg-base-800 border border-base-600 rounded">
-      <div className="flex items-baseline justify-between mb-4 flex-wrap gap-2">
-        <h3 className="font-display text-2xl font-semibold text-cream-100 leading-none">
-          {lounge.lounge_name}
+    <div className="p-5 bg-base-800 border border-base-600 rounded">
+      <div className="flex items-baseline justify-between gap-4 mb-3 flex-wrap">
+        <h3 className="font-display text-xl font-semibold text-cream-100">
+          {lounge.name || lounge.lounge_id}
         </h3>
-        <div className="text-xs text-cream-300 font-mono tabular">
-          {lounge.area} · {lounge.total_reviews} reviews · recency{" "}
-          {lounge.mean_recency_weight.toFixed(2)}
+        <div className="text-[10px] uppercase tracking-[0.2em] text-cream-500 font-mono tabular">
+          {lounge.area}
+          {lounge.price_tier ? ` · ${lounge.price_tier}` : ""}
         </div>
       </div>
 
       {topAspects.length > 0 && (
-        <div className="space-y-1.5 mb-4">
-          {topAspects.map((a) => (
-            <AspectRow key={`${a.aspect}-${a.sentiment}`} aspect={a} />
-          ))}
+        <div className="flex flex-wrap gap-2 mb-3">
+          {topAspects.map((a) => {
+            const sentimentClass =
+              a.sentiment === "positive"
+                ? "text-sage-400"
+                : a.sentiment === "negative"
+                  ? "text-terracotta-500"
+                  : "text-cream-300";
+            return (
+              <span
+                key={`${a.aspect}-${a.sentiment}`}
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-base-700 border border-base-600 rounded-sm text-[11px]"
+              >
+                <span className="text-cream-300">
+                  {ASPECT_LABELS[a.aspect] || a.aspect}
+                </span>
+                <span className={`font-mono tabular ${sentimentClass}`}>
+                  {a.sentiment === "positive"
+                    ? "+"
+                    : a.sentiment === "negative"
+                      ? "−"
+                      : "~"}
+                  {a.n_reviews}
+                </span>
+              </span>
+            );
+          })}
         </div>
       )}
 
       {reviewExcerpt && (
-        <div className="text-sm text-cream-100/90 italic border-l border-saffron-400/40 pl-4 mt-4 leading-relaxed">
+        <p className="text-sm text-cream-300 italic leading-relaxed border-l border-base-600 pl-3">
           "{reviewExcerpt}"
-          {topChunk?.review_date && (
-            <span className="block not-italic text-xs text-cream-500 mt-2 font-mono tabular">
-              — {topChunk.review_date}
-            </span>
-          )}
-        </div>
+        </p>
       )}
     </div>
   );
-}
-
-function AspectRow({ aspect }) {
-  const colour =
-    aspect.sentiment === "positive"
-      ? "text-sage-500"
-      : aspect.sentiment === "negative"
-        ? "text-terracotta-500"
-        : "text-saffron-400";
-
-  const label = aspect.aspect.replace(/_/g, " ");
-
-  return (
-    <div className="flex items-center justify-between text-sm">
-      <span className="text-cream-100">{label}</span>
-      <span className={`font-mono tabular text-xs ${colour}`}>
-        {aspect.sentiment} · {aspect.n_reviews}
-      </span>
-    </div>
-  );
-}
-
-function extractReview(document) {
-  const idx = document.indexOf("Review: ");
-  if (idx === -1) return null;
-  const text = document.slice(idx + 8);
-  return text.length > 300 ? text.slice(0, 300) + "…" : text;
 }
