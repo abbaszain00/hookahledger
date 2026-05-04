@@ -40,6 +40,15 @@ const PRICE_LABELS = Object.fromEntries(
   PRICE_TIERS.filter((p) => p.value).map((p) => [p.value, p.label]),
 );
 
+// Vignette layered on the page background. Subtle radial falloff so the page
+// reads as a low-lit space rather than a flat dark surface. Done as a CSS
+// background image rather than an extra element so it covers the entire
+// document height including the area below the content column.
+const PAGE_VIGNETTE = {
+  backgroundImage:
+    "radial-gradient(ellipse 80% 60% at 50% 0%, rgba(232, 160, 76, 0.04) 0%, transparent 60%), radial-gradient(ellipse 100% 80% at 50% 100%, rgba(0, 0, 0, 0.4) 0%, transparent 70%)",
+};
+
 export default function App() {
   const [mode, setMode] = useState("filtered"); // "filtered" | "agent"
 
@@ -83,8 +92,6 @@ export default function App() {
     setStatusMessage(null);
     setParsed(null);
 
-    // Build the URL. Filtered path takes user-set filters as params;
-    // agent path takes only the query.
     let url;
     if (mode === "agent") {
       const params = new URLSearchParams({ query: query.trim() });
@@ -100,7 +107,6 @@ export default function App() {
     const es = new EventSource(url);
     eventSourceRef.current = es;
 
-    // Status events: agent path only. Inline phase line that updates in place.
     es.addEventListener("status", (e) => {
       try {
         const data = JSON.parse(e.data);
@@ -110,8 +116,6 @@ export default function App() {
       }
     });
 
-    // Parsed event: agent path only. Fires once the parse + validate nodes
-    // have run. May contain mostly-null fields if parse_valid is false.
     es.addEventListener("parsed", (e) => {
       try {
         const data = JSON.parse(e.data);
@@ -125,8 +129,6 @@ export default function App() {
       try {
         const chunk = JSON.parse(e.data);
         setStreamingText((prev) => prev + chunk);
-        // First token means generation has started; clear the status line so
-        // the answer can take over the visual focus.
         setStatusMessage(null);
       } catch (err) {
         console.error("Failed to parse token:", err, e.data);
@@ -137,8 +139,6 @@ export default function App() {
       try {
         const evidence = JSON.parse(e.data);
         setResult(evidence);
-        // If the agent block came in here as well, prefer it over the standalone
-        // parsed event (same data, but the evidence block is canonical).
         if (evidence.agent) {
           setParsed((prev) => ({ ...(prev || {}), ...evidence.agent }));
         }
@@ -186,8 +186,6 @@ export default function App() {
   function handleModeChange(next) {
     if (streaming) return;
     setMode(next);
-    // Clear results when switching modes so the user doesn't see filtered-mode
-    // output sitting next to an agent-mode query box.
     setResult(null);
     setStreamingText("");
     setError(null);
@@ -195,32 +193,32 @@ export default function App() {
     setParsed(null);
   }
 
-  // Decide what text to display: validated text from the evidence event if
-  // we have it, otherwise the in-progress streaming text.
   const displayedText = result?.answer_validated ?? streamingText;
   const showAnswerCard =
     streaming || streamingText || result || statusMessage || parsed;
 
-  // Build the placeholder so it hints at the right kind of query for the mode.
   const placeholder =
     mode === "agent"
       ? "e.g. somewhere with great atmosphere in north london under £25"
       : "e.g. best service in north london";
 
   return (
-    <div className="min-h-screen bg-stone-50">
-      <div className="max-w-6xl mx-auto p-8">
-        <header className="mb-8">
-          <h1 className="text-3xl font-bold">HookahLedger</h1>
-          <p className="text-stone-600">
-            London shisha lounge intelligence engine. Ask anything.
+    <div className="min-h-screen" style={PAGE_VIGNETTE}>
+      <div className="max-w-6xl mx-auto px-8 py-12">
+        <header className="mb-12">
+          <h1 className="font-display text-6xl font-semibold text-cream-100 leading-none">
+            HookahLedger
+          </h1>
+          <p className="mt-3 text-cream-300 text-lg italic">
+            London shisha lounge intelligence engine.
           </p>
+          <div className="mt-6 h-px w-16 bg-saffron-400/60" />
         </header>
 
-        <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] gap-10">
           {/* Sidebar - hidden in agent mode */}
           {mode === "filtered" && (
-            <aside className="space-y-4">
+            <aside className="space-y-5">
               <FilterSelect
                 label="Area"
                 value={area}
@@ -247,40 +245,39 @@ export default function App() {
 
           {/* Main column - spans full width when sidebar is hidden */}
           <main className={mode === "agent" ? "md:col-span-2" : ""}>
-            {/* Mode toggle */}
             <ModeToggle
               mode={mode}
               onChange={handleModeChange}
               disabled={streaming}
             />
 
-            <div className="flex gap-2 mb-6">
+            <div className="flex gap-2 mb-8">
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder={placeholder}
-                className="flex-1 px-4 py-2 border border-stone-300 rounded focus:outline-none focus:border-stone-500"
+                className="flex-1 px-4 py-3 bg-base-800 border border-base-600 rounded text-cream-100 placeholder:text-cream-500 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
                 disabled={streaming}
               />
               <button
                 onClick={handleSubmit}
                 disabled={streaming || !query.trim()}
-                className="px-6 py-2 bg-stone-800 text-white rounded disabled:opacity-50 hover:bg-stone-700"
+                className="px-6 py-3 bg-saffron-400 text-base-900 font-medium rounded hover:bg-saffron-400/90 disabled:bg-base-700 disabled:text-cream-500 disabled:cursor-not-allowed transition"
               >
                 {streaming ? "Thinking…" : "Ask"}
               </button>
             </div>
 
             {error && (
-              <div className="p-4 mb-4 bg-red-50 border border-red-200 rounded text-red-900 text-sm">
-                <strong>Error:</strong> {error}
+              <div className="p-4 mb-4 bg-base-800 border border-terracotta-500/40 rounded text-terracotta-500 text-sm">
+                <span className="font-semibold">Error:</span> {error}
               </div>
             )}
 
             {showAnswerCard && (
-              <div className="space-y-6">
+              <div className="space-y-8">
                 {/* Inferred filters - agent mode only, hidden on decline */}
                 {mode === "agent" && parsed && !result?.is_declined && (
                   <InferredFilters parsed={parsed} />
@@ -288,28 +285,28 @@ export default function App() {
 
                 {/* Answer */}
                 <div
-                  className={`p-6 bg-white border rounded ${
+                  className={`relative p-7 bg-base-800 rounded ${
                     result?.is_declined
-                      ? "border-stone-300"
-                      : "border-stone-200"
+                      ? "border border-base-600"
+                      : "border-l-2 border-l-saffron-400 border-y border-r border-y-base-600 border-r-base-600"
                   }`}
                 >
-                  <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3 flex items-center gap-2">
+                  <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-4 flex items-center gap-2">
                     {result?.is_declined ? "Outside system scope" : "Answer"}
                     {streaming && !result?.is_declined && (
-                      <span className="inline-block w-2 h-2 rounded-full bg-stone-400 animate-pulse" />
-                    )}
-                    {statusMessage && !result?.is_declined && (
-                      <span className="text-stone-400 normal-case font-normal tracking-normal italic ml-2">
-                        {statusMessage}
-                      </span>
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-saffron-400 animate-pulse shadow-[0_0_8px_rgba(232,160,76,0.6)]" />
                     )}
                   </h2>
-                  <div className="prose prose-stone prose-sm max-w-none">
+                  {statusMessage && !result?.is_declined && (
+                    <div className="text-xs text-cream-300 italic mb-4 -mt-2">
+                      {statusMessage}
+                    </div>
+                  )}
+                  <div className="prose prose-invert prose-sm max-w-none prose-headings:font-display prose-headings:text-cream-100 prose-headings:font-semibold prose-strong:text-cream-100 prose-p:text-cream-100 prose-p:leading-relaxed prose-li:text-cream-100 prose-em:text-cream-300">
                     {displayedText ? (
                       <ReactMarkdown>{displayedText}</ReactMarkdown>
                     ) : (
-                      <span className="text-stone-400 italic">
+                      <span className="text-cream-300 italic">
                         {statusMessage || "Searching reviews…"}
                       </span>
                     )}
@@ -319,7 +316,7 @@ export default function App() {
                 {/* Evidence cards (only after stream completes) */}
                 {result?.lounges?.length > 0 && (
                   <div>
-                    <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500 mb-3">
+                    <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-4">
                       Evidence ({result.lounges.length}{" "}
                       {result.lounges.length === 1 ? "lounge" : "lounges"})
                     </h2>
@@ -333,22 +330,22 @@ export default function App() {
 
                 {/* Metadata - suppressed on decline (zeros would be misleading) */}
                 {result && !result.is_declined && (
-                  <div className="text-xs text-stone-500 pt-4 border-t border-stone-200 space-y-2">
+                  <div className="text-xs text-cream-500 pt-5 border-t border-base-600 space-y-3">
                     <div className="flex flex-wrap gap-2">
                       {result.degraded && (
-                        <div className="inline-block px-2 py-1 bg-amber-50 border border-amber-200 rounded text-amber-900">
-                          Partial response - stream interrupted before
+                        <div className="inline-block px-2.5 py-1 bg-base-800 border border-saffron-400/40 rounded text-saffron-400">
+                          Partial response — stream interrupted before
                           completion.
                         </div>
                       )}
                       {result.rerank_succeeded === false && (
-                        <div className="inline-block px-2 py-1 bg-amber-50 border border-amber-200 rounded text-amber-900">
-                          Rerank unavailable - results ordered by similarity +
+                        <div className="inline-block px-2.5 py-1 bg-base-800 border border-saffron-400/40 rounded text-saffron-400">
+                          Rerank unavailable — results ordered by similarity and
                           recency only.
                         </div>
                       )}
                     </div>
-                    <div>
+                    <div className="font-mono tabular">
                       {result.candidates_pulled} candidates pulled ·{" "}
                       {result.chunks?.length || 0} chunks · {result.tokens_in}{" "}
                       in / {result.tokens_out} out · $
@@ -370,14 +367,14 @@ export default function App() {
 
 function ModeToggle({ mode, onChange, disabled }) {
   return (
-    <div className="mb-4 inline-flex p-1 bg-stone-200 rounded">
+    <div className="mb-5 inline-flex p-0.5 bg-base-800 border border-base-600 rounded">
       <button
         onClick={() => onChange("filtered")}
         disabled={disabled}
-        className={`px-4 py-1.5 text-sm font-medium rounded transition ${
+        className={`px-4 py-1.5 text-xs uppercase tracking-widest font-medium rounded-sm transition ${
           mode === "filtered"
-            ? "bg-white text-stone-900 shadow-sm"
-            : "text-stone-600 hover:text-stone-900"
+            ? "bg-saffron-400 text-base-900"
+            : "text-cream-300 hover:text-cream-100"
         } disabled:opacity-50 disabled:cursor-not-allowed`}
       >
         Filtered
@@ -385,10 +382,10 @@ function ModeToggle({ mode, onChange, disabled }) {
       <button
         onClick={() => onChange("agent")}
         disabled={disabled}
-        className={`px-4 py-1.5 text-sm font-medium rounded transition ${
+        className={`px-4 py-1.5 text-xs uppercase tracking-widest font-medium rounded-sm transition ${
           mode === "agent"
-            ? "bg-white text-stone-900 shadow-sm"
-            : "text-stone-600 hover:text-stone-900"
+            ? "bg-saffron-400 text-base-900"
+            : "text-cream-300 hover:text-cream-100"
         } disabled:opacity-50 disabled:cursor-not-allowed`}
       >
         Agent
@@ -398,7 +395,6 @@ function ModeToggle({ mode, onChange, disabled }) {
 }
 
 function InferredFilters({ parsed }) {
-  // Build pill list from whichever fields the parser populated.
   const pills = [];
   if (parsed.area)
     pills.push({ key: "area", label: "Area", value: parsed.area });
@@ -415,19 +411,16 @@ function InferredFilters({ parsed }) {
       value: ASPECT_LABELS[parsed.aspect_positive] || parsed.aspect_positive,
     });
 
-  // parse_valid === false means the parser bailed (low confidence, schema fail,
-  // API error). Show that rather than an empty pill row so the user understands
-  // why no filters were applied.
   const parseFailed = parsed.parse_valid === false;
   const noFilters = pills.length === 0 && !parseFailed;
 
   return (
-    <div className="p-4 bg-stone-100 border border-stone-200 rounded">
-      <div className="text-xs font-semibold uppercase tracking-wide text-stone-500 mb-2">
+    <div className="p-4 bg-base-800 border border-base-600 rounded">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-3">
         Inferred from your query
       </div>
       {parseFailed ? (
-        <div className="text-sm text-stone-600 italic">
+        <div className="text-sm text-cream-300 italic">
           Could not infer structured filters
           {parsed.validation_reason
             ? ` (${parsed.validation_reason}).`
@@ -435,25 +428,25 @@ function InferredFilters({ parsed }) {
           Falling back to unfiltered retrieval.
         </div>
       ) : noFilters ? (
-        <div className="text-sm text-stone-600 italic">
-          No filters inferred - searching all lounges.
+        <div className="text-sm text-cream-300 italic">
+          No filters inferred. Searching all lounges.
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
           {pills.map((p) => (
             <span
               key={p.key}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-stone-300 rounded text-xs"
+              className="inline-flex items-center gap-1.5 px-3 py-1 bg-base-700 border border-base-600 rounded-sm text-xs"
             >
-              <span className="text-stone-500">{p.label}:</span>
-              <span className="font-medium text-stone-900">{p.value}</span>
+              <span className="text-cream-300">{p.label}:</span>
+              <span className="font-medium text-cream-100">{p.value}</span>
             </span>
           ))}
           {parsed.cleaned_query &&
             parsed.cleaned_query !== parsed.raw_query && (
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white border border-stone-300 rounded text-xs">
-                <span className="text-stone-500">Searching for:</span>
-                <span className="font-medium text-stone-900 italic">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-base-700 border border-base-600 rounded-sm text-xs">
+                <span className="text-cream-300">Searching for:</span>
+                <span className="font-medium text-cream-100 italic">
                   "{parsed.cleaned_query}"
                 </span>
               </span>
@@ -467,17 +460,17 @@ function InferredFilters({ parsed }) {
 function FilterSelect({ label, value, onChange, options, disabled }) {
   return (
     <div>
-      <label className="block text-xs font-semibold uppercase tracking-wide text-stone-500 mb-1">
+      <label className="block text-[10px] font-semibold uppercase tracking-[0.2em] text-cream-300 mb-2">
         {label}
       </label>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="w-full px-3 py-2 border border-stone-300 rounded bg-white text-sm focus:outline-none focus:border-stone-500"
+        className="w-full px-3 py-2 bg-base-800 border border-base-600 rounded text-sm text-cream-100 focus:outline-none focus:border-saffron-400 focus:ring-1 focus:ring-saffron-400/50 transition"
       >
         {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
+          <option key={opt.value} value={opt.value} className="bg-base-800">
             {opt.label}
           </option>
         ))}
@@ -496,17 +489,19 @@ function LoungeCard({ lounge }) {
   const reviewExcerpt = topChunk ? extractReview(topChunk.document) : null;
 
   return (
-    <div className="p-5 bg-white border border-stone-200 rounded">
-      <div className="flex items-baseline justify-between mb-3 flex-wrap gap-2">
-        <h3 className="text-lg font-semibold">{lounge.lounge_name}</h3>
-        <div className="text-xs text-stone-500">
+    <div className="p-6 bg-base-800 border border-base-600 rounded">
+      <div className="flex items-baseline justify-between mb-4 flex-wrap gap-2">
+        <h3 className="font-display text-2xl font-semibold text-cream-100 leading-none">
+          {lounge.lounge_name}
+        </h3>
+        <div className="text-xs text-cream-300 font-mono tabular">
           {lounge.area} · {lounge.total_reviews} reviews · recency{" "}
           {lounge.mean_recency_weight.toFixed(2)}
         </div>
       </div>
 
       {topAspects.length > 0 && (
-        <div className="space-y-1 mb-3">
+        <div className="space-y-1.5 mb-4">
           {topAspects.map((a) => (
             <AspectRow key={`${a.aspect}-${a.sentiment}`} aspect={a} />
           ))}
@@ -514,10 +509,10 @@ function LoungeCard({ lounge }) {
       )}
 
       {reviewExcerpt && (
-        <div className="text-sm text-stone-700 italic border-l-2 border-stone-300 pl-3 mt-3">
+        <div className="text-sm text-cream-100/90 italic border-l border-saffron-400/40 pl-4 mt-4 leading-relaxed">
           "{reviewExcerpt}"
           {topChunk?.review_date && (
-            <span className="block not-italic text-xs text-stone-500 mt-1">
+            <span className="block not-italic text-xs text-cream-500 mt-2 font-mono tabular">
               — {topChunk.review_date}
             </span>
           )}
@@ -530,17 +525,17 @@ function LoungeCard({ lounge }) {
 function AspectRow({ aspect }) {
   const colour =
     aspect.sentiment === "positive"
-      ? "text-emerald-700"
+      ? "text-sage-500"
       : aspect.sentiment === "negative"
-        ? "text-red-700"
-        : "text-amber-700";
+        ? "text-terracotta-500"
+        : "text-saffron-400";
 
   const label = aspect.aspect.replace(/_/g, " ");
 
   return (
     <div className="flex items-center justify-between text-sm">
-      <span className="text-stone-700">{label}</span>
-      <span className={`font-mono ${colour}`}>
+      <span className="text-cream-100">{label}</span>
+      <span className={`font-mono tabular text-xs ${colour}`}>
         {aspect.sentiment} · {aspect.n_reviews}
       </span>
     </div>
